@@ -1,0 +1,25 @@
+{
+  "name": "h59-health",
+  "private": true,
+  "version": "0.1.0",
+  "description": "H59 Health — modern, self-hosted replacement for QWatch Pro (H59 / Colmi-QC BLE fitness bands).",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "dev:web": "npm run dev --workspace apps/web",
+    "dev:mobile": "npm run start --workspace apps/mobile",
+    "db:generate": "npm run generate --workspace packages/db",
+    "db:migrate": "npm run migrate --workspace packages/db"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
