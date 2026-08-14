@@ -19,3 +19,5 @@ __pycache__/
 ble_probe_output/
 .vercel/
 .claude/settings.local.json
+
+.vercel
