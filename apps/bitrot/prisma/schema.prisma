@@ -1,0 +1,152 @@
+// Bitrot data model.
+//
+// Isolation rule: every scan/acknowledgement read or write is scoped by the
+// session userId resolved server-side (see src/lib/auth/session.ts). A
+// client-supplied userId is never trusted. Foreign keys here give referential
+// integrity, not authorization.
+//
+// PackageRecord is the one table that is NOT user-scoped: it is a shared cache
+// of public registry metadata, keyed by (ecosystem, name). It holds nothing
+// private — only what registry.npmjs.org and pypi.org already serve publicly.
+
+generator client {
+  provider = "prisma-client-js"
+  // Custom output keeps this client from colliding with @h59/db's generated
+  // client, which would otherwise share node_modules/.prisma in the workspace.
+  output   = "../src/generated/prisma"
+  // "native" covers local dev; the rhel target is what Vercel's serverless
+  // runtime needs. Without it a deploy builds fine and then fails at runtime
+  // with "Query engine library for current platform could not be found".
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Ecosystem {
+  npm
+  pypi
+}
+
+enum ScanStatus {
+  running
+  complete
+  failed
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  scans            Scan[]
+  acknowledgements Acknowledgement[]
+
+  @@map("users")
+}
+
+model Scan {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Filename or user-supplied label, e.g. "package.json".
+  label     String
+  ecosystem Ecosystem
+  status    ScanStatus @default(running)
+  error     String?
+
+  /// Dependencies found in the manifest.
+  totalPackages Int @default(0)
+  /// Dependencies successfully resolved against the registry.
+  resolvedPackages Int @default(0)
+
+  /// 0-100, higher = more rot. See docs/ROT_SCORE.md for the formula.
+  portfolioScore Int?
+  grade          String?
+
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  findings Finding[]
+
+  @@index([userId, createdAt])
+  @@map("scans")
+}
+
+model Finding {
+  id     String @id @default(cuid())
+  scanId String
+  scan   Scan   @relation(fields: [scanId], references: [id], onDelete: Cascade)
+
+  ecosystem   Ecosystem
+  packageName String
+  /// Where the dependency was declared, e.g. "dependencies", "devDependencies".
+  section String?
+  /// The range as written in the manifest, e.g. "^4.17.21".
+  requestedRange String?
+  /// Concrete version in use when the manifest pins one (lockfiles always do).
+  resolvedVersion String?
+  latestVersion   String?
+
+  /// 0-100, higher = more rot. Null when the registry lookup failed.
+  rotScore Int?
+  grade    String?
+  /// Why the score came out that way — array of {id,label,value,weight,detail}.
+  signals Json?
+  /// Ordered, human-readable explanations shown in the UI.
+  reasons Json?
+
+  lastPublishAt    DateTime?
+  firstPublishAt   DateTime?
+  maintainerCount  Int?
+  releaseCount     Int?
+  deprecated       Boolean   @default(false)
+  deprecationNote  String?
+  license          String?
+  repositoryUrl    String?
+
+  /// Set when the registry lookup failed; rotScore stays null.
+  lookupError String?
+
+  @@index([scanId])
+  @@index([scanId, rotScore])
+  @@map("findings")
+}
+
+/// Shared cache of normalised public registry metadata. Not user-scoped.
+model PackageRecord {
+  id        String    @id @default(cuid())
+  ecosystem Ecosystem
+  /// Canonical name: as-published for npm, PEP 503 normalised for PyPI.
+  name String
+
+  /// Normalised RegistryPackage payload (see src/lib/registry/types.ts).
+  payload   Json
+  fetchedAt DateTime @default(now())
+
+  @@unique([ecosystem, name])
+  @@index([fetchedAt])
+  @@map("package_records")
+}
+
+/// A user deciding "yes, this package is stale, and that is fine here."
+/// Acknowledged packages are excluded from the portfolio score.
+model Acknowledgement {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  ecosystem   Ecosystem
+  packageName String
+  note        String?
+  createdAt   DateTime @default(now())
+
+  @@unique([userId, ecosystem, packageName])
+  @@map("acknowledgements")
+}

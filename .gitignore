@@ -22,3 +22,7 @@ ble_probe_output/
 .claude/settings.local.json
 
 .vercel
+
+# Prisma client generated into the app tree (apps/bitrot)
+apps/bitrot/src/generated/
+*.tsbuildinfo

@@ -1,3 +1,17 @@
+# bandinha
+
+This repository holds two independent products.
+
+| Product | What it is | Start here |
+|---|---|---|
+| **[Bitrot](apps/bitrot/)** | Dependency lifecycle risk, scored from live npm and PyPI registry data. Finds the dependencies that are deprecated, abandoned, or one maintainer away from unmaintained — the half of supply-chain risk CVE scanners cannot see. | [`apps/bitrot/README.md`](apps/bitrot/README.md) |
+| **H59 Health** | Self-hosted replacement for the QWatch Pro fitness-band app. | the rest of this file |
+
+They share a workspace and a lockfile but nothing else — separate apps,
+separate databases, separate deploys.
+
+---
+
 # H59 Health
 
 A modern, self-hosted replacement for **QWatch Pro** — the app that ships
@@ -43,6 +57,7 @@ Full citations and the SUPPORTED / EXPERIMENTAL / UNKNOWN breakdown live in
 
 ```
 apps/
+  bitrot/     Bitrot — separate product, see apps/bitrot/README.md
   mobile/     Expo + TypeScript + react-native-ble-plx — the only place BLE happens
   web/        Next.js — backend API + web dashboard, one deploy
 packages/
