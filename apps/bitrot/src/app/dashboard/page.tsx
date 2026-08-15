@@ -14,11 +14,7 @@ export default async function DashboardPage() {
   if (!userId) redirect("/login");
 
   const [scans, acknowledgements] = await Promise.all([
-    prisma.scan.findMany({
-      where: { userId },
-      orderBy: { createdAt: "desc" },
-      take: 25,
-    }),
+    prisma.scan.findMany({ where: { userId }, orderBy: { createdAt: "desc" }, take: 25 }),
     prisma.acknowledgement.count({ where: { userId } }),
   ]);
 
@@ -27,15 +23,17 @@ export default async function DashboardPage() {
   return (
     <>
       <Nav />
-      <main className="container" style={{ padding: "44px 24px 80px" }}>
-        <div className="spread" style={{ marginBottom: 28 }}>
+      <main className="container" style={{ padding: "44px 24px 88px" }}>
+        <div className="spread" style={{ marginBottom: 26 }}>
           <div>
             <h1 style={{ fontSize: 27 }}>Dashboard</h1>
             <p className="muted small" style={{ marginTop: 6 }}>
               {scans.length === 0
                 ? "No scans yet."
                 : `${scans.length} scan${scans.length === 1 ? "" : "s"}${
-                    acknowledgements > 0 ? ` · ${acknowledgements} acknowledged package${acknowledgements === 1 ? "" : "s"}` : ""
+                    acknowledgements > 0
+                      ? ` · ${acknowledgements} acknowledged package${acknowledgements === 1 ? "" : "s"}`
+                      : ""
                   }`}
             </p>
           </div>
@@ -47,38 +45,32 @@ export default async function DashboardPage() {
         {scans.length === 0 ? (
           <EmptyState />
         ) : (
-          <div className="stack" style={{ gap: 26 }}>
+          <div className="stack" style={{ gap: 24 }}>
             {latest && (
-              <div className="card">
+              <Link href={`/scans/${latest.id}`} className="card card-hover" style={{ display: "block" }}>
                 <div className="row" style={{ gap: 26, alignItems: "center", flexWrap: "wrap" }}>
-                  <ScoreDial
-                    score={latest.portfolioScore ?? 0}
-                    grade={(latest.grade ?? "A") as Grade}
-                  />
+                  <ScoreDial score={latest.portfolioScore ?? 0} grade={(latest.grade ?? "A") as Grade} />
+
                   <div className="stack" style={{ gap: 8, flex: "1 1 260px", minWidth: 0 }}>
-                    <span className="tiny faint" style={{ textTransform: "uppercase", letterSpacing: "0.07em" }}>
-                      Most recent scan
-                    </span>
+                    <span className="eyebrow">Most recent scan</span>
                     <div className="row" style={{ gap: 10 }}>
                       <GradeBadge grade={(latest.grade ?? "A") as Grade} />
-                      <Link href={`/scans/${latest.id}`} className="mono truncate" style={{ fontWeight: 600 }}>
+                      <span className="mono truncate" style={{ fontWeight: 600 }}>
                         {latest.label}
-                      </Link>
+                      </span>
                     </div>
                     <p className="small muted" style={{ margin: 0 }}>
                       {latest.resolvedPackages} of {latest.totalPackages} dependencies resolved from{" "}
                       {latest.ecosystem === "npm" ? "npm" : "PyPI"} ·{" "}
                       {latest.createdAt.toISOString().slice(0, 10)}
                     </p>
-                    <Link href={`/scans/${latest.id}`} className="link small">
-                      View findings →
-                    </Link>
+                    <span className="link small">View findings →</span>
                   </div>
                 </div>
-              </div>
+              </Link>
             )}
 
-            <div className="card" style={{ padding: 0 }}>
+            <div className="card" style={{ padding: 0, overflow: "hidden" }}>
               <div className="table-wrap">
                 <table className="table">
                   <thead>
@@ -93,31 +85,39 @@ export default async function DashboardPage() {
                   <tbody>
                     {scans.map((scan) => (
                       <tr key={scan.id}>
-                        <td style={{ paddingLeft: 22, maxWidth: 280 }}>
-                          <Link href={`/scans/${scan.id}`} className="mono small truncate" style={{ display: "block", fontWeight: 550 }}>
+                        <td style={{ paddingLeft: 22, maxWidth: 300 }}>
+                          <Link
+                            href={`/scans/${scan.id}`}
+                            className="mono small truncate"
+                            style={{ display: "block", fontWeight: 550 }}
+                          >
                             {scan.label}
                           </Link>
                           {scan.status !== "complete" && (
-                            <span className="badge" data-tone={scan.status === "failed" ? "danger" : undefined} style={{ marginTop: 6 }}>
+                            <span
+                              className="badge"
+                              data-tone={scan.status === "failed" ? "danger" : undefined}
+                              style={{ marginTop: 6 }}
+                            >
                               {scan.status}
                             </span>
                           )}
                         </td>
                         <td className="small muted">{scan.ecosystem === "npm" ? "npm" : "PyPI"}</td>
-                        <td className="small muted">
+                        <td className="small muted tnum">
                           {scan.resolvedPackages}/{scan.totalPackages}
                         </td>
                         <td>
                           {scan.portfolioScore !== null && scan.grade ? (
                             <span className="row" style={{ gap: 9 }}>
                               <GradeBadge grade={scan.grade as Grade} />
-                              <span className="mono small">{scan.portfolioScore}</span>
+                              <span className="mono small tnum">{scan.portfolioScore}</span>
                             </span>
                           ) : (
                             <span className="faint small">—</span>
                           )}
                         </td>
-                        <td className="small muted" style={{ paddingRight: 22, whiteSpace: "nowrap" }}>
+                        <td className="small muted tnum" style={{ paddingRight: 22, whiteSpace: "nowrap" }}>
                           {scan.createdAt.toISOString().slice(0, 10)}
                         </td>
                       </tr>
@@ -135,9 +135,9 @@ export default async function DashboardPage() {
 
 function EmptyState() {
   return (
-    <div className="card" style={{ textAlign: "center", padding: "56px 26px" }}>
+    <div className="card" style={{ textAlign: "center", padding: "58px 26px" }}>
       <h2 style={{ fontSize: 20 }}>Run your first scan</h2>
-      <p className="muted" style={{ marginTop: 12, maxWidth: 420, margin: "12px auto 0" }}>
+      <p className="muted" style={{ maxWidth: 430, margin: "12px auto 0" }}>
         Paste a <code className="mono">package.json</code>,{" "}
         <code className="mono">package-lock.json</code> or{" "}
         <code className="mono">requirements.txt</code>. A sample manifest is one click away if you

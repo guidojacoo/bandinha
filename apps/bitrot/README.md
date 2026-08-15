@@ -106,6 +106,31 @@ Open **http://localhost:3001**.
    immediately without a re-scan; the package stays visible, greyed out.
 7. **`/scan`** — paste your own manifest, or click a sample. Upload works too.
 
+## Interface
+
+The score is the product, so the UI's job is to make it arguable rather than
+just assertable. Three decisions carry most of that:
+
+- **Signals are drawn, not tabulated.** Each signal's bar *length* encodes its
+  weight — how much it can move the score — and the *filled* portion encodes
+  how much it did. A heavy signal that fired is a long bright bar; a light one
+  is short. That ranking is invisible in a column of percentages.
+- **Every number is labelled with its direction.** An earlier version showed
+  `100%` next to *Staleness*, which reads as "100% healthy" and means the exact
+  opposite. Values now read `100% risk`, and unscorable signals read
+  `not scored` rather than `0`.
+- **Unscorable is visually distinct from healthy.** A signal PyPI cannot answer
+  is greyed with an empty track, so "we don't know" never looks like "it's fine".
+
+The palette is dark-only and deliberately single-track — the accent is a rust
+terracotta, which is what the product is named after. Keyboard focus is visible
+on every control, `prefers-reduced-motion` is respected, and the nav, signal
+rows, and hero all reflow to a single column on narrow screens.
+
+The landing page hero scores a real package server-side on each render rather
+than showing a mockup, raced against a 2.5s budget so a cold cache can never
+make the page hang on a third party.
+
 ## Verifying it actually works
 
 ```bash

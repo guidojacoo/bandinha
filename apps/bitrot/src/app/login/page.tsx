@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { AuthForm } from "@/components/AuthForm";
 import { Nav } from "@/components/Nav";
@@ -11,8 +12,15 @@ export default async function LoginPage() {
   return (
     <>
       <Nav />
-      <main className="container-narrow" style={{ padding: "70px 24px" }}>
+      <main className="auth-wrap">
         <AuthForm mode="login" />
+        <p className="tiny faint" style={{ textAlign: "center" }}>
+          Checking a single package needs no account —{" "}
+          <Link href="/check" className="link">
+            try that first
+          </Link>
+          .
+        </p>
       </main>
     </>
   );

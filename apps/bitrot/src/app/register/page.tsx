@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { AuthForm } from "@/components/AuthForm";
 import { Nav } from "@/components/Nav";
@@ -11,8 +12,15 @@ export default async function RegisterPage() {
   return (
     <>
       <Nav />
-      <main className="container-narrow" style={{ padding: "70px 24px" }}>
+      <main className="auth-wrap">
         <AuthForm mode="register" />
+        <p className="tiny faint" style={{ textAlign: "center" }}>
+          An account stores your scans so you can track rot over time. Single-package checks stay{" "}
+          <Link href="/check" className="link">
+            free and account-less
+          </Link>
+          .
+        </p>
       </main>
     </>
   );

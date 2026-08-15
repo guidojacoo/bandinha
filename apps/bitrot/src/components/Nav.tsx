@@ -2,6 +2,7 @@ import Link from "next/link";
 import { getUserId } from "@/lib/auth/session";
 import { LogoutButton } from "./LogoutButton";
 import { Logo } from "./Logo";
+import { NavLinks } from "./NavLinks";
 
 export async function Nav() {
   const userId = await getUserId();
@@ -15,24 +16,25 @@ export async function Nav() {
         </Link>
 
         <div className="nav-links">
-          <Link href="/check" className="nav-link">
-            Check a package
-          </Link>
           {userId ? (
             <>
-              <Link href="/dashboard" className="nav-link">
-                Dashboard
-              </Link>
-              <Link href="/scan" className="nav-link">
-                New scan
-              </Link>
+              <NavLinks
+                items={[
+                  { href: "/dashboard", label: "Dashboard" },
+                  { href: "/scan", label: "New scan" },
+                  { href: "/check", label: "Check a package" },
+                ]}
+              />
               <LogoutButton />
             </>
           ) : (
             <>
-              <Link href="/login" className="nav-link">
-                Sign in
-              </Link>
+              <NavLinks
+                items={[
+                  { href: "/check", label: "Check a package" },
+                  { href: "/login", label: "Sign in" },
+                ]}
+              />
               <Link href="/register" className="btn btn-sm" style={{ marginLeft: 6 }}>
                 Get started
               </Link>

@@ -83,11 +83,11 @@ export function ScanForm() {
       )}
 
       <div className="spread">
-        <div className="row tiny faint" style={{ gap: 8, flexWrap: "wrap" }}>
-          <span>Load a sample:</span>
+        <div className="row tiny faint" style={{ gap: 7, flexWrap: "wrap" }}>
+          <span>Load a sample</span>
           <button
             type="button"
-            className="btn btn-ghost tiny"
+            className="btn-chip"
             onClick={() => {
               setManifest(SAMPLE_PACKAGE_JSON);
               setFilename("package.json");
@@ -97,7 +97,7 @@ export function ScanForm() {
           </button>
           <button
             type="button"
-            className="btn btn-ghost tiny"
+            className="btn-chip"
             onClick={() => {
               setManifest(SAMPLE_REQUIREMENTS);
               setFilename("requirements.txt");
