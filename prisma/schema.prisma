@@ -89,19 +89,19 @@ model BillableEvent {
   lead       Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
 
   /// contact_delivered | reply_received | meeting_confirmed | deal_won
-  kind String
+  kind       String
   /// When the thing happened, not when it was recorded.
   occurredAt DateTime
   /// What the system holds as proof, shown on the invoice.
-  evidence String
+  evidence   String
   /// The message or deal this is derived from, for the audit trail.
-  messageId String?
+  messageId  String?
   /// Deal value in cents, for a share-priced win.
   valueCents Int?
 
   /// Stamped when it appears on an issued invoice.
-  invoicedAt  DateTime?
-  invoiceRef  String?
+  invoicedAt DateTime?
+  invoiceRef String?
 
   createdAt DateTime @default(now())
 
@@ -130,11 +130,11 @@ model Campaign {
   error     String?
 
   /// JSON: Offering
-  offering String?
+  offering         String?
   /// JSON: Icp
-  icp      String?
+  icp              String?
   /// JSON: SenderIdentity
-  senderIdentity String?
+  senderIdentity   String?
   /// JSON: Partial<ComplianceConfig>
   complianceConfig String?
 
@@ -155,6 +155,7 @@ model Campaign {
   events      Event[]
   runs        AgentRun[]
   billable    BillableEvent[]
+  jobs        Job[]
 
   @@index([userId, createdAt])
   @@index([clientId, createdAt])
@@ -166,20 +167,20 @@ model Lead {
   campaignId String
   campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
-  domain      String
-  companyName String
-  url         String
+  domain        String
+  companyName   String
+  url           String
   /// discovered | qualifying | qualified | rejected | enrolled
-  status      String @default("discovered")
+  status        String @default("discovered")
   /// Which source found it, and how. Shown in the console.
   discoveredVia String
 
   /// JSON: LeadProfile — includes the evidence quotes outreach may use.
-  profile String?
+  profile        String?
   /// JSON: FitResult, including the per-signal breakdown.
-  fit      String?
-  fitScore Int?
-  fitBand  String?
+  fit            String?
+  fitScore       Int?
+  fitBand        String?
   rejectedReason String?
 
   createdAt   DateTime  @default(now())
@@ -201,18 +202,18 @@ model Contact {
   leadId String
   lead   Lead   @relation(fields: [leadId], references: [id], onDelete: Cascade)
 
-  email String
-  name  String?
-  title String?
+  email  String
+  name   String?
+  title  String?
   /// "role" (info@) or "individual"
-  kind  String
+  kind   String
   /// The page the address was published on — the lawful-basis paper trail.
   source String
 
   /// Deliverability pre-flight result, JSON: DeliverabilityCheck
   deliverability String?
   /// Denormalised so enrollment can filter without parsing JSON.
-  deliverable Boolean @default(true)
+  deliverable    Boolean @default(true)
 
   createdAt DateTime @default(now())
 
@@ -232,10 +233,10 @@ model Enrollment {
   contactId  String
   contact    Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
 
-  sequenceName String
+  sequenceName  String
   /// JSON: Sequence — frozen at enrollment so changing the default cadence
   /// cannot rewrite history.
-  sequence     String
+  sequence      String
   /// pending | active | replied | meeting | won | lost | unsubscribed | bounced | exhausted
   state         String @default("pending")
   nextStepIndex Int    @default(0)
@@ -271,19 +272,19 @@ model Message {
   subject   String
   body      String
 
-  stepIndex  Int?
-  stepIntent String?
+  stepIndex   Int?
+  stepIntent  String?
   /// "llm" | "llm-repaired" | "template" — how the copy was produced.
   composedVia String?
 
   /// The agent's own measured opinion of this copy, 0-100, from
   /// core/quality.ts. Stored so the console can show it and so a drop in
   /// copy quality is visible before the reply rate shows it.
-  qualityScore Int?
+  qualityScore  Int?
   /// JSON: QualityCheck[] — the named checks behind that score.
   qualityChecks String?
   /// JSON: the composing attempts, for "why does it read like this?"
-  attempts String?
+  attempts      String?
 
   /// JSON: ProvenanceRecord[] — every factual claim with its source URL.
   /// A message cannot be sent unless each claim resolves to a crawled page.
@@ -347,10 +348,10 @@ model Suppression {
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  email  String
+  email            String
   /// unsubscribed | hard_bounce | complained | manual | not_interested | undeliverable
-  reason String
-  note   String?
+  reason           String
+  note             String?
   sourceCampaignId String?
 
   createdAt DateTime @default(now())
@@ -366,7 +367,7 @@ model Event {
   campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
   kind    String
-  level   String @default("info")
+  level   String  @default("info")
   message String
   /// JSON blob of structured detail.
   data    String?
@@ -392,6 +393,89 @@ model AgentRun {
 
   @@index([campaignId, startedAt])
   @@map("agent_runs")
+}
+
+/// Work waiting to be done, and the only thing that grants the right to do it.
+///
+/// The agent outgrew a loop in a terminal as soon as it had to run for more
+/// than one campaign: a terminal does not survive a reboot, one cron entry per
+/// campaign does not survive a second campaign, and a file lock does not
+/// survive a second machine. A row does. A worker claims it, renews a lease
+/// while it works, and finishes by scheduling the next one — so the work
+/// spreads across as many workers as you care to start, on as many machines.
+///
+/// `dedupeKey` is the double-send defence, and it is a unique index rather
+/// than a lock on purpose: a lock is held by a process, and when the other
+/// process is on another machine the lock is imaginary. The key is cleared
+/// when a job reaches a terminal state, and both SQLite and Postgres treat
+/// NULLs in a unique index as distinct — so finished jobs pile up harmlessly
+/// while at most one live job per key can exist. A running campaign therefore
+/// has exactly one `tick` row for its whole life, and "run now" claims that
+/// row early rather than adding a second one.
+model Job {
+  id         String    @id @default(cuid())
+  /// ingest | tick
+  kind       String
+  campaignId String?
+  campaign   Campaign? @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  /// Null once terminal. See the note above — this is the whole guarantee.
+  dedupeKey String? @unique
+
+  /// queued | running | done | dead
+  status   String  @default("queued")
+  /// Higher first. Ingest outranks a tick because somebody is waiting on it.
+  priority Int     @default(0)
+  /// JSON: whatever the handler needs.
+  payload  String?
+
+  /// Counts starts, not finishes, so a crash loop cannot run forever.
+  attempts    Int @default(0)
+  maxAttempts Int @default(5)
+
+  runAt      DateTime  @default(now())
+  /// A claim is only good until this moment; the holder renews it as it works.
+  leaseUntil DateTime?
+  claimedBy  String?
+
+  startedAt  DateTime?
+  finishedAt DateTime?
+  lastError  String?
+  /// JSON: the last run's summary, so the console can show what a tick did.
+  result     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// The claim query: queued work whose time has come.
+  @@index([status, runAt, priority])
+  /// The reaper's query: claims whose holder stopped breathing.
+  @@index([status, leaseUntil])
+  @@index([campaignId, status])
+  @@map("jobs")
+}
+
+/// A worker that is, or was, running.
+///
+/// Not required by anything — the queue is correct whether or not workers
+/// announce themselves. It exists because the first question anyone asks of an
+/// unattended system is "is it actually running?", and the honest answer needs
+/// a heartbeat rather than an inference from the absence of recent work.
+model WorkerInstance {
+  /// host/pid/random, which is the same name that appears in `claimedBy`.
+  id          String    @id
+  host        String?
+  concurrency Int       @default(1)
+  startedAt   DateTime  @default(now())
+  lastSeenAt  DateTime  @default(now())
+  stoppedAt   DateTime?
+  /// Counters since this worker started, not all time.
+  claimed     Int       @default(0)
+  done        Int       @default(0)
+  failed      Int       @default(0)
+
+  @@index([lastSeenAt])
+  @@map("workers")
 }
 
 /// Daily LLM token accounting.

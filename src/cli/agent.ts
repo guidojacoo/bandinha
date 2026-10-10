@@ -1,6 +1,9 @@
 import { db } from "../infra/db";
 import { tick, pipelineSummary, type TickSummary } from "../agent/orchestrator";
 import { withLock } from "../infra/lock";
+import { asJobHolder, earliestDue } from "../agent/worker";
+import { didWork, nextRunAt } from "../core/queue";
+import { policy } from "../infra/queue";
 import { colour, heading, llmForRun, requireDatabase, fatal, run } from "./lib";
 import { dnsUsable } from "./lib";
 
@@ -51,30 +54,54 @@ run(async () => {
   }
 
   /**
-   * One tick, under a lock.
+   * One tick, as the holder of the campaign's job.
    *
-   * The lock is what makes this safe to put in a cron entry. A schedule that
-   * fires every ten minutes against a tick that occasionally takes twelve
-   * will overlap, and two overlapping ticks both read "sent today: 4", both
-   * decide there is room, and quietly double the daily cap, the per-domain
-   * cap and the anti-pester gap. Every one of those is a deliberate
-   * protection and they are worth nothing if a second process walks past.
+   * Overlapping ticks are the most expensive thing that can go wrong
+   * unattended: both read "sent today: 4", both decide there is room, and the
+   * daily cap, the per-domain cap and the anti-pester gap are all quietly
+   * doubled. Every one of those is a deliberate protection and they are worth
+   * nothing if a second process walks past them.
+   *
+   * So this takes the same claim a worker takes — the campaign's own job row.
+   * A file lock used to do it, and did it only for this machine; the other
+   * process worth excluding is a worker on a different one, which is why the
+   * arbiter is now a row rather than a file. Both are also wrapped in the
+   * file lock, which costs nothing and still catches two of these commands
+   * racing before either has reached the database.
    */
   const runOnce = async (label: string) => {
-    const outcome = await withLock(campaignId, label, () =>
-      tick({
+    const locked = await withLock(campaignId, label, async () => {
+      const held = await asJobHolder({
+        kind: "tick",
         campaignId,
-        llm,
-        useDns,
-        onProgress: (message) => console.log(`  ${message}`),
-      }));
+        run: async () => {
+          const summary = await tick({
+            campaignId,
+            llm,
+            useDns,
+            onProgress: (message) => console.log(`  ${message}`),
+          });
+          const nextDueAt = await earliestDue(campaignId);
+          return {
+            value: summary,
+            result: summary,
+            next: nextRunAt({ didWork: didWork(summary), nextDueAt, now: new Date(), policy: policy() }),
+          };
+        },
+      });
+      return held;
+    });
 
-    if (!outcome.ran) {
-      console.log(colour.yellow(`  Another tick is already running: ${outcome.heldBy}, since ${outcome.since.toISOString()}.`));
+    if (!locked.ran) {
+      console.log(colour.yellow(`  Another tick is already running on this machine: ${locked.heldBy}, since ${locked.since.toISOString()}.`));
+      return null;
+    }
+    if (!locked.result.ran) {
+      console.log(colour.yellow(`  ${locked.result.heldBy} is already ticking this campaign, since ${locked.result.since.toISOString()}.`));
       console.log(colour.dim("  Skipped rather than queued — overlapping ticks double every send cap."));
       return null;
     }
-    return outcome.result;
+    return locked.result.value;
   };
 
   if (!loop) {

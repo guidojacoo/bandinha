@@ -25,7 +25,8 @@
     "buyers": "tsx fixtures/buyers.ts",
     "discover": "tsx src/cli/discover.ts",
     "mock:groq": "tsx fixtures/groq-cli.ts",
-    "health": "tsx src/cli/health.ts"
+    "health": "tsx src/cli/health.ts",
+    "worker": "tsx src/cli/worker.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
