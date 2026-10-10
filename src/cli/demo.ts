@@ -1,11 +1,14 @@
 import { execFile } from "node:child_process";
 import { mkdir, rm } from "node:fs/promises";
 import { promisify } from "node:util";
+import { createHmac, randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { db, logEvent } from "../infra/db";
+import { DEFAULT_TERMS, formatMoney, renderInvoice } from "../core/billing";
+import { closeDeal, confirmMeeting, invoiceFor } from "../agent/billing";
 import { ingest } from "../agent/ingest";
 import { pipelineSummary, tick } from "../agent/orchestrator";
-import { toJson } from "../lib/json";
+import { fromJson, toJson } from "../lib/json";
 import { fetchText } from "../infra/http";
 import { prospectDomains, world } from "../../fixtures/world";
 import { colour, heading, llmForRun, requireDatabase, run } from "./lib";
@@ -87,9 +90,23 @@ run(async () => {
   // sources are exercised by `npm run discover`.
   process.env.SEED_DOMAINS = prospectDomains().map((d) => `http://${d}:${PORT}/`).join(",");
 
+  // A client to bill, so the run shows the money as well as the pipeline.
+  await db.client.deleteMany({ where: { userId: user.id, name: "Northwind (demo client)" } });
+  const client = await db.client.create({
+    data: {
+      userId: user.id,
+      name: "Northwind (demo client)",
+      contactEmail: "ap@northwind.test",
+      billingAddress: "Northwind Software Ltd, 4 Dock Street, Bristol BS1 4RU",
+      webhookSecret: randomBytes(24).toString("hex"),
+      terms: toJson({ ...DEFAULT_TERMS, minimumInvoiceCents: 0 }),
+    },
+  });
+
   const campaign = await db.campaign.create({
     data: {
       userId: user.id,
+      clientId: client.id,
       sourceUrl: `http://northwind.test:${PORT}/`,
       name: "Northwind (demo)",
       status: "running",
@@ -172,9 +189,96 @@ run(async () => {
     }));
   }
 
-  // --- 5. what actually happened ------------------------------------------
+  // --- 5. the money ------------------------------------------------------
+  heading("5. What it earned");
+  await settleAndBill(campaign.id, client.id, client.webhookSecret!);
+
+  // --- 6. what actually happened ------------------------------------------
   await report(campaign.id, rounds);
 });
+
+/**
+ * Confirms a meeting, takes a payment, and prints the invoice.
+ *
+ * The payment goes through the real webhook handler rather than calling
+ * `closeDeal` directly, signed with the client's own secret — because the
+ * claim being demonstrated is that *only* a payment or a person can close a
+ * deal, and a demo that bypassed the signature check would not be
+ * demonstrating it.
+ */
+async function settleAndBill(campaignId: string, clientId: string, secret: string): Promise<void> {
+  // A meeting is billable only once a person confirms it. The classifier
+  // reading "happy to chat, what times suit?" as a meeting request is not
+  // enough to bill a client on.
+  const meeting = await db.deal.findFirst({
+    where: { campaignId, stage: { in: ["meeting_booked", "proposal"] } },
+    include: { lead: true },
+    orderBy: { updatedAt: "desc" },
+  });
+  if (meeting) {
+    await confirmMeeting(meeting.leadId, "demo operator");
+    console.log(`  ${colour.green("✓")} Meeting with ${meeting.lead.companyName} confirmed by a person — now billable.`);
+  }
+
+  // The payment, through the signed webhook.
+  const paying = await db.deal.findFirst({
+    where: { campaignId, stage: "proposal" },
+    include: { lead: true },
+    orderBy: { updatedAt: "desc" },
+  });
+
+  if (paying) {
+    const body = JSON.stringify({
+      domain: paying.lead.domain,
+      amountCents: 1_080_000,
+      currency: "USD",
+      reference: "pi_demo_3Kx91",
+    });
+    const signature = createHmac("sha256", secret).update(body, "utf8").digest("hex");
+
+    const { POST } = await import("../app/api/payments/[clientId]/route");
+    const response = await POST(
+      new Request(`http://localhost/api/payments/${clientId}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-mercurio-signature": signature },
+        body,
+      }),
+      { params: Promise.resolve({ clientId }) },
+    );
+    const result = (await response.json()) as { ok?: boolean; stage?: string; reason?: string };
+    console.log(
+      result.ok
+        ? `  ${colour.green("✓")} Payment webhook closed ${paying.lead.companyName} at ${formatMoney(1_080_000)} — signature verified.`
+        : `  ${colour.red("✗")} Payment webhook refused: ${result.reason}`,
+    );
+
+    // And prove the signature is actually load-bearing.
+    const forged = await POST(
+      new Request(`http://localhost/api/payments/${clientId}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-mercurio-signature": "0".repeat(64) },
+        body: JSON.stringify({ domain: "fableworks.test", amountCents: 999_999 }),
+      }),
+      { params: Promise.resolve({ clientId }) },
+    );
+    console.log(
+      forged.status === 401
+        ? `  ${colour.green("✓")} An unsigned payment notification is refused (401).`
+        : `  ${colour.red("✗")} An unsigned payment notification was accepted — the signature check is not working.`,
+    );
+  }
+
+  const { invoice } = await invoiceFor(clientId);
+  console.log();
+  for (const line of renderInvoice(invoice, {
+    from: "You",
+    to: "Northwind Software Ltd, 4 Dock Street, Bristol BS1 4RU",
+    reference: "demo-0001",
+    notes: "Every line above can be checked against the messages in ./outbox.",
+  }).split("\n")) {
+    console.log(`  ${colour.dim("│")} ${line}`);
+  }
+}
 
 /**
  * A business hour guaranteed to be *after* anything enrolled during this run.
@@ -221,13 +325,13 @@ async function runBuyers(): Promise<void> {
 async function report(campaignId: string, rounds: Array<Awaited<ReturnType<typeof tick>>>): Promise<void> {
   const [leads, messages, escalations, suppressions, pipeline] = await Promise.all([
     db.lead.findMany({ where: { campaignId }, include: { contacts: true }, orderBy: { fitScore: "desc" } }),
-    db.message.findMany({ where: { campaignId }, orderBy: { createdAt: "asc" } }),
+    db.message.findMany({ where: { campaignId }, include: { contact: true }, orderBy: { createdAt: "asc" } }),
     db.event.findMany({ where: { campaignId, kind: "reply.escalated" } }),
     db.suppression.findMany({}),
     pipelineSummary(campaignId),
   ]);
 
-  heading("5. Leads");
+  heading("6. Leads");
   for (const lead of leads) {
     const verdict = lead.status === "enrolled"
       ? colour.green("enrolled")
@@ -236,7 +340,7 @@ async function report(campaignId: string, rounds: Array<Awaited<ReturnType<typeo
     if (lead.rejectedReason) console.log(colour.dim(`    ${lead.rejectedReason}`));
   }
 
-  heading("6. What it wrote");
+  heading("7. What it wrote");
   const sent = messages.filter((m) => m.direction === "outbound" && m.status === "sent");
   const first = sent.find((m) => m.stepIndex === 0);
   if (first) {
@@ -245,7 +349,7 @@ async function report(campaignId: string, rounds: Array<Awaited<ReturnType<typeo
     for (const line of first.body.split("\n")) console.log(`  ${colour.cyan("│")} ${line}`);
   }
 
-  heading("7. Totals");
+  heading("8. Totals");
   const totals = rounds.reduce(
     (sum, round) => ({
       discovered: sum.discovered + round.discovered,
@@ -272,7 +376,7 @@ async function report(campaignId: string, rounds: Array<Awaited<ReturnType<typeo
   console.log(`  suppressed   ${suppressions.length}`);
   console.log(`\n  Pipeline: ${Object.entries(pipeline.byStage).filter(([, n]) => n > 0).map(([s, n]) => `${s} ${n}`).join(", ")}`);
 
-  heading("8. Did the gates actually fire?");
+  heading("9. Did the gates actually fire?");
   const checks: Array<{ label: string; pass: boolean; detail: string }> = [];
   const byDomain = new Map(leads.map((l) => [l.domain, l]));
 
@@ -320,11 +424,58 @@ async function report(campaignId: string, rounds: Array<Awaited<ReturnType<typeo
     pass: suppressions.some((s) => s.reason === "unsubscribed"),
     detail: suppressions.map((s) => `${s.email} (${s.reason})`).join(", ") || "none",
   });
+  const agentClosed = await db.deal.count({ where: { campaignId, stage: "won", closedBy: null } });
   checks.push({
-    label: "commitment and pricing escalated, not closed",
-    pass: escalations.length > 0 && pipeline.won === 0,
-    detail: `${escalations.length} escalation(s), ${pipeline.won} deal(s) marked won by the agent`,
+    label: "the agent closed no deal by itself",
+    pass: escalations.length > 0 && agentClosed === 0,
+    detail: `${escalations.length} escalation(s), ${agentClosed} deal(s) won with nobody recorded as closing them`,
   });
+  const billable = await db.billableEvent.findMany({ where: { campaignId }, include: { lead: true } });
+  const wonDeals = await db.deal.findMany({ where: { campaignId, stage: "won" } });
+
+  checks.push({
+    label: "billed one contact per prospect, not one per message",
+    // A four-touch sequence is one contact delivered. Charging per message
+    // would pay the operator to send a fourth email to somebody who ignored
+    // three, which is the behaviour the product's own gates exist to prevent.
+    pass: billable.filter((e) => e.kind === "contact_delivered").length === sent.filter((m) => m.stepIndex === 0).length,
+    detail: `${billable.filter((e) => e.kind === "contact_delivered").length} contact(s) billed, ${sent.length} message(s) sent`,
+  });
+  // One reply charge per prospect, not per message: Fableworks replied three
+  // times in this run and is charged once. And nothing is charged for a
+  // bounce, an out-of-office, or somebody asking to be left alone.
+  const chargeableRepliers = new Set(
+    messages
+      .filter((m) => {
+        if (m.direction !== "inbound") return false;
+        const intent = fromJson<{ intent?: string }>(m.analysis, {}).intent ?? "";
+        return !["bounce", "auto_reply", "unsubscribe"].includes(intent);
+      })
+      .map((m) => m.contact.leadId),
+  );
+  const billedReplies = billable.filter((e) => e.kind === "reply_received");
+  checks.push({
+    label: "one reply charge per prospect, none for a bounce or a complaint",
+    pass: billedReplies.length === chargeableRepliers.size &&
+      billedReplies.every((e) => !/bounce|out of office|unsubscribe/i.test(e.evidence)),
+    detail: `${billedReplies.length} charged, ${chargeableRepliers.size} prospect(s) replied chargeably, ${messages.filter((m) => m.direction === "inbound").length} inbound message(s)`,
+  });
+  checks.push({
+    label: "a meeting was billed only after a person confirmed it",
+    pass: billable.filter((e) => e.kind === "meeting_confirmed").every((e) => /confirmed as a real meeting/i.test(e.evidence)),
+    detail: `${billable.filter((e) => e.kind === "meeting_confirmed").length} meeting(s) billed`,
+  });
+  checks.push({
+    label: "every won deal was closed by a payment or a person",
+    pass: wonDeals.length > 0 && wonDeals.every((d) => d.closedBy === "payment" || d.closedBy === "operator"),
+    detail: wonDeals.map((d) => `${d.closedBy ?? "nobody"}${d.paymentReference ? ` (${d.paymentReference})` : ""}`).join(", ") || "none",
+  });
+  checks.push({
+    label: "every charge carries its evidence",
+    pass: billable.length > 0 && billable.every((e) => e.evidence.length > 30),
+    detail: `${billable.length} charge(s)`,
+  });
+
   checks.push({
     label: "nothing sent to a suppressed address afterwards",
     // Compared on `createdAt`, which is the real clock on both rows. `sentAt`

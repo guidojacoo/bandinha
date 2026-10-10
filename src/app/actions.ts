@@ -1,5 +1,6 @@
 "use server";
 
+import { randomBytes } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createSession, destroySession, ownedCampaign, readSession, verifyPassword } from "../lib/auth";
@@ -11,6 +12,8 @@ import { createLlm } from "../infra/llm";
 import { PrismaBudgetStore, recordModelUsage } from "../infra/db";
 import { smtpConfigFromEnv } from "../infra/transport";
 import { dnsAvailable } from "../infra/dns";
+import { DEFAULT_TERMS, monthOf, type PricingTerms } from "../core/billing";
+import { closeDeal, confirmMeeting, markInvoiced } from "../agent/billing";
 import type { Icp, Offering } from "../core/types";
 
 /**
@@ -260,4 +263,160 @@ export async function updateTargets(formData: FormData): Promise<void> {
     },
   });
   revalidatePath(`/campaigns/${campaign.id}`);
+}
+
+// ---------------------------------------------------------------------------
+// Billing
+// ---------------------------------------------------------------------------
+
+/**
+ * Creating a client to bill.
+ *
+ * The webhook secret is generated here rather than asked for. A secret
+ * somebody types is a secret somebody reuses.
+ */
+export async function createClient(formData: FormData): Promise<void> {
+  const session = await readSession();
+  if (!session) redirect("/login");
+
+  const name = String(formData.get("name") ?? "").trim();
+  if (!name) redirect("/billing?error=name");
+
+  const client = await db.client.create({
+    data: {
+      userId: session.userId,
+      name,
+      contactEmail: String(formData.get("contactEmail") ?? "").trim() || null,
+      billingAddress: String(formData.get("billingAddress") ?? "").trim() || null,
+      webhookSecret: randomBytes(24).toString("hex"),
+      terms: toJson(termsFromForm(formData)),
+    },
+  });
+  redirect(`/billing?client=${client.id}`);
+}
+
+export async function updateTerms(formData: FormData): Promise<void> {
+  const session = await readSession();
+  if (!session) redirect("/login");
+
+  const clientId = String(formData.get("clientId") ?? "");
+  const client = await db.client.findFirst({ where: { id: clientId, userId: session.userId } });
+  if (!client) redirect("/billing");
+
+  await db.client.update({
+    where: { id: client.id },
+    data: { terms: toJson({ ...DEFAULT_TERMS, ...fromJson<Partial<PricingTerms>>(client.terms, {}), ...termsFromForm(formData) }) },
+  });
+  revalidatePath("/billing");
+}
+
+/** Cents are parsed from whole currency units, which is what people type. */
+function termsFromForm(formData: FormData): Partial<PricingTerms> {
+  const money = (name: string) => {
+    const value = Number(String(formData.get(name) ?? "").replace(/[^0-9.]/g, ""));
+    return Number.isFinite(value) ? Math.round(value * 100) : undefined;
+  };
+  const percent = Number(String(formData.get("dealSharePercent") ?? "").replace(/[^0-9.]/g, ""));
+
+  const terms: Partial<PricingTerms> = {};
+  const currency = String(formData.get("currency") ?? "").trim().toUpperCase();
+  if (currency) terms.currency = currency;
+  const assign = (key: keyof PricingTerms, value: number | undefined) => {
+    if (value !== undefined) (terms as Record<string, number>)[key] = value;
+  };
+  assign("perContactCents", money("perContact"));
+  assign("perReplyCents", money("perReply"));
+  assign("perMeetingCents", money("perMeeting"));
+  assign("perDealCents", money("perDeal"));
+  assign("monthlyRetainerCents", money("monthlyRetainer"));
+  assign("minimumInvoiceCents", money("minimumInvoice"));
+  if (Number.isFinite(percent)) terms.dealSharePoints = Math.round(percent * 100);
+  return terms;
+}
+
+export async function assignClient(formData: FormData): Promise<void> {
+  const campaignId = String(formData.get("campaignId") ?? "");
+  const campaign = await ownedCampaign(campaignId);
+  if (!campaign) redirect("/");
+
+  const session = await readSession();
+  const raw = String(formData.get("clientId") ?? "");
+  // An empty selection means "bill nobody", which is a legitimate choice.
+  const clientId = raw
+    ? (await db.client.findFirst({ where: { id: raw, userId: session!.userId } }))?.id ?? null
+    : null;
+
+  await db.campaign.update({ where: { id: campaign.id }, data: { clientId } });
+  revalidatePath(`/campaigns/${campaign.id}`);
+}
+
+/**
+ * Confirming a meeting, which is what makes one billable.
+ *
+ * Kept as an explicit operator action rather than derived from the reply
+ * classifier. Reading "happy to chat, what times suit?" as a meeting request
+ * is right most of the time, and most of the time is not a standard you can
+ * bill somebody to.
+ */
+export async function confirmMeetingAction(formData: FormData): Promise<void> {
+  const session = await readSession();
+  if (!session) redirect("/login");
+
+  const leadId = String(formData.get("leadId") ?? "");
+  const lead = await db.lead.findFirst({ where: { id: leadId, campaign: { userId: session.userId } } });
+  if (!lead) redirect("/");
+
+  await confirmMeeting(lead.id, session.email);
+  revalidatePath(`/campaigns/${lead.campaignId}`);
+  revalidatePath("/billing");
+}
+
+/** Closing a deal by hand, for money that arrived outside any webhook. */
+export async function closeDealAction(formData: FormData): Promise<void> {
+  const session = await readSession();
+  if (!session) redirect("/login");
+
+  const leadId = String(formData.get("leadId") ?? "");
+  const lead = await db.lead.findFirst({ where: { id: leadId, campaign: { userId: session.userId } } });
+  if (!lead) redirect("/");
+
+  const amount = Number(String(formData.get("amount") ?? "").replace(/[^0-9.]/g, ""));
+  await closeDeal({
+    leadId: lead.id,
+    closedBy: "operator",
+    valueCents: Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) : undefined,
+    reference: String(formData.get("reference") ?? "").trim() || undefined,
+  });
+
+  revalidatePath(`/campaigns/${lead.campaignId}`);
+  revalidatePath("/billing");
+}
+
+/** Issues the invoice, which is the only thing that stamps the events. */
+export async function issueInvoice(formData: FormData): Promise<void> {
+  const session = await readSession();
+  if (!session) redirect("/login");
+
+  const clientId = String(formData.get("clientId") ?? "");
+  const client = await db.client.findFirst({ where: { id: clientId, userId: session.userId } });
+  if (!client) redirect("/billing");
+
+  const period = monthOf(new Date());
+  const reference = `${period.start.toISOString().slice(0, 7)}-${client.id.slice(-6)}`;
+  const count = await markInvoiced(client.id, period, reference);
+
+  revalidatePath("/billing");
+  redirect(`/billing?client=${client.id}&issued=${count}&ref=${encodeURIComponent(reference)}`);
+}
+
+export async function rotateWebhookSecret(formData: FormData): Promise<void> {
+  const session = await readSession();
+  if (!session) redirect("/login");
+
+  const clientId = String(formData.get("clientId") ?? "");
+  const client = await db.client.findFirst({ where: { id: clientId, userId: session.userId } });
+  if (!client) redirect("/billing");
+
+  await db.client.update({ where: { id: client.id }, data: { webhookSecret: randomBytes(24).toString("hex") } });
+  revalidatePath("/billing");
 }

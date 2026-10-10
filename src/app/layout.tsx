@@ -30,6 +30,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               <nav>
                 <a href="/">Campaigns</a>
                 <a href="/sources">Sources</a>
+                <a href="/billing">Billing</a>
                 <a href="/suppressions">Suppressions</a>
               </nav>
             )}

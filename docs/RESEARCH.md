@@ -161,6 +161,37 @@ recruiting copy addressed to a candidate, and ordinary prose that a naive
 short-word heuristic reads as a menu. Each of those reached a draft message
 during the build. The gate is now about a third of the code it guards.
 
+## What the second pass changed
+
+Three more corrections, from building the parts the first pass left as
+intentions.
+
+**"Specific copy" is not one gate, it is two.** The research framed the
+0.3%-versus-4% reply gap as a specificity problem, and the evidence gate
+answers that. What it does not answer is whether the resulting sentence is
+worth reading — and a message can be perfectly specific and still open with
+"I hope this finds you well", ask three questions, and run to 160 words. So
+specificity and quality are now measured separately, and the finding that
+forced it was embarrassing: a four-touch sequence where every message scored a
+perfect quality 100 and all four were *the same email*. Quality is a property
+of the sequence, not of the draft.
+
+**Performance pricing only works if the units are provable.** The obvious
+objection to charging per meeting is that the vendor decides what a meeting
+is. The agent's existing refusals turn out to be the answer: it already will
+not assert a closed deal, so a win can only be recorded by a payment or a
+person — which makes it billable. A meeting is billable only once a human
+confirms it, because the reply classifier is good and not perfect, and most of
+the time is not a standard you can invoice to. The gates built for honesty
+turned out to be the billing guarantees.
+
+**The free claim has a hard edge, and it is collection.** Leads, inference,
+storage and sending are all free or already paid for. Raising an invoice is
+free. Taking money is not: every payment rail charges a percentage. Saying so
+is better than quietly implying otherwise, and it is why the payment path is a
+signed webhook rather than a provider SDK — the provider is the operator's
+choice and the operator's cost.
+
 ## Sources
 
 - [Top 5 AI Sales / SDR Tools in 2026](https://guptadeepak.com/tools/top-5-ai-sales-sdr-tools-2026/)

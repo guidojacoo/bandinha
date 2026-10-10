@@ -1,7 +1,9 @@
 # Mercurio
 
 An outbound sales agent that finds its own leads in open data, writes only
-what it can prove, and costs nothing to run.
+what it can prove, measures its own copy, and costs nothing to run. Bill per
+contact delivered or per deal closed — on units the system holds the evidence
+for.
 
 Paste the URL of whatever you are selling. The agent reads that site, works
 out what the offer is and who buys it, goes and finds those companies in
@@ -44,6 +46,8 @@ So the design rule is *structurally incapable*, not *instructed not to*:
 | Fabrication | Every factual claim is traced back to text actually crawled, before the message goes out. A claim that cannot be traced rejects the draft. | `src/core/provenance.ts` |
 | Autonomy that overreaches | Handles objections itself; stops at commitment, pricing and routing. Never marks its own deal won. | `src/core/classify.ts` |
 | Free tiers run out | The day's token allowance is rationed per task, so extraction cannot starve a reply to a live prospect. | `src/core/budget.ts` |
+| Copy nobody would read | Eleven measured checks. A draft below the bar is rewritten against the checks it failed, best-of-N, and the template competes on the same score. | `src/core/quality.ts` |
+| Billing a client for nothing | A unit is chargeable only when the evidence for it is in the database. A meeting needs a person; a win needs a payment. | `src/core/billing.ts` |
 | Paid data vendors | Six free discovery sources, routed by what the ICP actually is. | `src/infra/sources/` |
 
 ---
@@ -95,18 +99,27 @@ Expected output, end of run:
   ✓ every claim traced to a crawled page
   ✓ opt-out suppressed globally
   ✓ commitment and pricing escalated, not closed
+  ✓ the agent closed no deal by itself
+  ✓ billed one contact per prospect, not one per message
+  ✓ one reply charge per prospect, none for a bounce or a complaint
+  ✓ a meeting was billed only after a person confirmed it
+  ✓ every won deal was closed by a payment or a person
+  ✓ every charge carries its evidence
   ✓ nothing sent to a suppressed address afterwards
 
-  All 12 checks passed.
+  All 17 checks passed.
 ```
 
 ```
-7. Totals
-  discovered   9        qualified    4        rejected     5
-  enrolled     4        sent         4        blocked      0
-  replies read 6        answered     2        escalated    1
+8. Totals
+  discovered   9        qualified    5        rejected     4
+  enrolled     5        sent         5        blocked      0
+  replies read 7        answered     2        escalated    2
   suppressed   2
 ```
+
+The run also confirms a meeting, takes a payment through the signed webhook,
+proves an *unsigned* one is refused, and prints the invoice with its evidence.
 
 Read `./outbox` afterwards. Those `.eml` files are exactly what would have been
 sent.
@@ -153,6 +166,108 @@ every check is run live rather than inferred from configuration.
 
 ---
 
+## The copy is measured, not hoped for
+
+"Write a good email" is not something a prompt can be trusted to deliver, so
+every draft is scored before it is sent — on length, the opening sentence,
+filler, specificity, a single ask at the end, the you-versus-we balance,
+hedging, jargon, readability, formatting, and whether it repeats an earlier
+message. A draft below the threshold is rewritten against the specific checks
+it failed, and the score is stored with the message, so a drop in copy quality
+is visible before the reply rate shows it.
+
+```
+step 1  first_touch   100/100   "forty pages a week"
+step 2  value_add      94/100   "on-call engineers paged"
+step 3  social_proof  100/100   "on-call engineers paged"
+step 4  breakup       100/100   "closing the loop — Fableworks"
+```
+
+Composing is best-of-N rather than first-that-passes, against two bars that
+fail differently. `validateDraft` is about truth and legality: an unsupported
+claim or a missing postal address is fatal and no rewriting counts.
+`scoreQuality` is about whether the thing is worth reading, where a second
+attempt is usually better but not always. The deterministic template is a
+*competitor* in that comparison, not a last resort — if the model cannot beat
+it on the same scoring, the template goes out.
+
+The finding that justified building this: the first version of the templates
+ignored the step intent entirely and produced **the same email four times**,
+and every one of them scored a perfect 100 on its own. Quality is a property
+of the sequence, not only of the draft, so repetition is now a disqualifier
+rather than a demerit — a resend scores well on every other check, because it
+was a good email the first time.
+
+A note on the ask. It asks about their situation, not their calendar:
+
+> Is alert noise something you are already working on, or has it just become
+> background?
+
+"Do you have fifteen minutes" wants a commitment before they know whether they
+care. The question above costs them one line, and the meeting becomes obvious
+in the conversation it starts.
+
+---
+
+## Charging for it: per contact, or per sale
+
+The commercial shape this makes possible is running outbound for somebody and
+billing them for what it produced, instead of paying $36k a year for a seat.
+Four unit types, priced in `/billing`:
+
+| Unit | Chargeable when |
+|---|---|
+| **Contact delivered** | A first message actually left for an address that passed the deliverability pre-flight. One per prospect — a four-touch sequence is one contact, not four. |
+| **Reply received** | A human replied. One per prospect, and never for a bounce, an out-of-office, or somebody asking to be left alone. |
+| **Meeting confirmed** | A person confirmed the reply really was a meeting. The classifier alone is not a standard you can bill a client to. |
+| **Deal won** | A payment or a countersignature closed it. Flat fee, or a share of a recorded value. |
+
+The rule underneath all four: **a unit is billable only when the system holds
+the evidence for it.** Every invoice line carries that evidence, so a client
+can check the bill against reality rather than taking it on trust — the same
+argument the product makes about its own copy:
+
+```
+Item                          Qty        Rate        Amount
+------------------------------------------------------------
+Contacts delivered              5       $0.50         $2.50
+Replies received                4       $5.00        $20.00
+Meetings confirmed              1      $50.00        $50.00
+Deals won                       1       share     $1,080.00
+------------------------------------------------------------
+Total                                             $1,152.50
+
+What you are being charged for
+------------------------------------------------------------
+Deals won:
+  2026-10-13  Meridian Pay (meridianpay.test)
+      Closed by a payment (pi_demo_3Kx91) on 2026-10-13.
+```
+
+Prices are deliberately weighted toward outcomes. Charging mostly per contact
+rewards volume, which is exactly the behaviour the research says destroys a
+sending domain — the price list should not pull against the product's own
+gates. There is no deal value guessed, ever: no recorded value means no
+revenue share, because inventing a deal size to bill a percentage of it is the
+billing version of fabricating a proof point.
+
+### Getting paid
+
+`POST /api/payments/<clientId>` is the only route that can mark a deal won,
+and it is the counterpart to the agent being forbidden from asserting one.
+Signed with HMAC-SHA256 over the raw body, compared in constant time, so any
+provider works — Stripe, Lemon Squeezy, Mollie, a bank notification, or a
+script you run after a transfer clears. No provider SDK and no account stands
+in front of the one feature that closes the loop.
+
+**What costs money.** Running the agent is free: open data for the leads, a
+free model tier, SQLite on disk, your own SMTP. Raising an invoice is free —
+it is plain text with the evidence attached. *Collecting* is the one thing
+that is not, because every payment rail takes a percentage. That is the honest
+edge of the claim and no amount of engineering removes it.
+
+---
+
 ## Where the leads come from
 
 Six sources, picked by what the ICP is. A developer tool asks package
@@ -191,13 +306,48 @@ GitHub filtered by language instead.
 
 ---
 
-## It works without an LLM
+## Groq, and what has actually been run
 
 Set `GROQ_API_KEY` and the model writes the copy, derives the offer and reads
-the replies. Leave it unset and all of that is derived deterministically
-instead — and that path is a first-class product surface, not a stub. It
-produces the same shapes, carries the same provenance, and passes exactly the
-same validator.
+the replies. `GROQ_BASE_URL` points at anything OpenAI-compatible, so a local
+llama.cpp or vLLM works too — the other way to keep inference free.
+
+Groq is unreachable from the machine this was built on, which would have left
+the most load-bearing integration in the product asserted rather than run. So
+the protocol is implemented instead, and the whole thing runs against it:
+
+```bash
+npm run mock:groq      # a server that speaks Groq, in another terminal
+GROQ_BASE_URL=http://127.0.0.1:8099/openai/v1 GROQ_API_KEY=test-key npm run demo
+```
+
+It is a deliberately difficult server. The first compose request returns what
+a model actually produces on a first pass — "I hope this finds you well", two
+questions, a hedge, a buzzword — so the scorer rejects it and the critique loop
+has to work. Its ICP response hands back a size band the wrong way round and a
+claim attributed to a page that does not exist. A mock that always answered
+perfectly would prove nothing about the part of the system built to handle
+imperfection.
+
+Seventeen wire tests cover: token accounting taken from the provider rather
+than our estimate, the model and cap actually sent, prose-and-fence JSON
+extraction, a 429 honoured for the 1.3 seconds its body asks for (Groq puts
+the wait in the error message, with no `Retry-After` header), a rate-limited
+attempt still charged to the budget, a 503 retried, a bad key degrading after
+exactly one request, the budget enforced before the socket rather than after,
+the first draft rejected with the critique carrying the scorer's own findings
+into the next prompt, and a commitment escalating without the model being
+consulted at all.
+
+**What this cannot prove is whether the real model writes well.** It proves
+that when the model writes badly, the system notices and fixes it.
+
+## It also works without an LLM
+
+Leave the key unset and the offer, the ICP, the copy and the replies are all
+derived deterministically — and that path is a first-class product surface,
+not a stub. It produces the same shapes, carries the same provenance, passes
+exactly the same validator, and clears the same quality bar.
 
 This matters because the free tier runs out. An agent that stops working at
 that point is not free, it is a trial. So the honest version of the claim is:
@@ -281,6 +431,8 @@ src/core/        pure: no network, no database, no clock except one passed in
   draft.ts         mechanics, fabrication and specificity, in one validator
   icp.ts           who buys this, and which free sources can find them
   budget.ts        how much of today's free tier is left, per task
+  quality.ts       is this copy worth reading? eleven measured checks
+  billing.ts       what may be charged for, and the evidence each unit needs
 
 src/infra/       everything that touches the outside world
   http.ts          the only place that calls fetch: robots, delays, size caps
@@ -298,22 +450,28 @@ src/agent/       the pipeline
   compose.ts       the message, quote first, claims declared
   converse.ts      answering a reply, and knowing when not to
   deals.ts         stages derived from what happened, terminal stages absorb
+  billing.ts       raising charges from facts, and the only path to `won`
   orchestrator.ts  one tick: replies, discover, qualify, enrol, send
 
 src/app/         the operator console (Next.js)
 src/cli/         setup, sell, agent, demo, doctor, discover
-fixtures/        ten sites and five scripted buyers, for the end-to-end proof
-test/            428 tests, none of which need a network
+fixtures/        ten sites, five scripted buyers, and a server that speaks Groq
+test/            542 tests
 ```
 
 The split is the point. Everything that has to be *right* — who may be
 contacted, whether a claim is true, whether an address will bounce, what a
-reply means, when the next touch is due — is a pure function with its inputs
-passed in. That is why the dangerous paths can be tested exhaustively without
-an inbox, a resolver, or a model.
+reply means, when the next touch is due, whether the copy is worth reading,
+what may be charged for — is a pure function with its inputs passed in. That
+is why the dangerous paths can be tested exhaustively without an inbox, a
+resolver, or a model.
+
+Two test files are deliberately not pure: `groq-wire` runs the real client
+against the protocol server, and `payments` exercises the only route that can
+record money, against a throwaway database rather than yours.
 
 ```bash
-npm test         # 428 tests, ~3s
+npm test         # 542 tests, ~14s
 npm run typecheck
 ```
 
@@ -330,9 +488,16 @@ It is a way to run a disciplined outbound motion that would otherwise cost
 $36,000 a year, without the four specific mistakes currently churning the
 people who pay that.
 
-Three of six discovery sources, the SMTP transport, the IMAP reader, the MX
-verifier and the Groq client itself are complete and unexercised, for the
-network reasons above. They are marked as such everywhere they appear. The
-pure core, the npm, directory and seed sources, the crawler, the extractor,
-the full agent pipeline, the dry-run transport and the console are all proven
-end to end by `npm run demo` and `npm run discover`.
+Three of six discovery sources, the SMTP transport, the IMAP reader and the MX
+verifier are complete and unexercised, for the network reasons above. They are
+marked as such everywhere they appear. The pure core, the npm, directory and
+seed sources, the crawler, the extractor, the full agent pipeline, the model
+client against Groq's protocol, the quality scorer, the billing layer, the
+payment webhook, the dry-run transport and the console are all proven end to
+end by `npm run demo`, `npm run discover` and 542 tests.
+
+And one thing worth saying plainly about the copy: it is measured, and
+measuring is not the same as selling. The scorer encodes what is known to
+correlate with replies — specificity, brevity, one ask, no filler. Whether a
+particular market replies to a particular sentence is a question only sending
+answers, which is what the quality score stored on every message is for.

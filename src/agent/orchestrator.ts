@@ -10,6 +10,7 @@ import { compose } from "./compose";
 import { converse } from "./converse";
 import { enrollmentEventFor, stageFor, summarise } from "./deals";
 import { qualify } from "./qualify";
+import { billContactDelivered, billReplyReceived } from "./billing";
 import type { Llm } from "../infra/llm/types";
 import type { Inbox, Transport } from "../infra/transport/types";
 import type {
@@ -192,7 +193,7 @@ export function defaultCompliance(sender: SenderIdentity): ComplianceConfig {
 
 interface PhaseArgs extends TickOptions {
   now: Date;
-  campaign: { id: string; userId: string; targetLeads: number; minFitScore: number; meetingLink: string | null };
+  campaign: { id: string; userId: string; clientId: string | null; targetLeads: number; minFitScore: number; meetingLink: string | null };
   context: CampaignContext;
   budget: TickBudget;
   summary: TickSummary;
@@ -260,6 +261,20 @@ async function readReplies(args: PhaseArgs & { inbox: Inbox; transport: Transpor
       data: { analysis: toJson(action.analysis) },
     });
 
+    // A reply from a human is chargeable; a mailer-daemon response is not,
+    // and neither is a complaint — invoicing a client for somebody telling
+    // them to go away is indefensible however the contract is worded.
+    if (!["bounce", "auto_reply", "unsubscribe"].includes(action.analysis.intent)) {
+      await billReplyReceived({
+        campaignId: campaign.id,
+        clientId: campaign.clientId,
+        leadId: contact.leadId,
+        fromEmail: contact.email,
+        receivedAt: message.receivedAt,
+        intent: action.analysis.intent,
+      });
+    }
+
     const enrollment = contact.enrollments[0];
     const event = enrollmentEventFor(action.analysis.intent);
     if (enrollment && event) {
@@ -319,6 +334,7 @@ async function readReplies(args: PhaseArgs & { inbox: Inbox; transport: Transpor
         const outcome = await deliver({
           ...args,
           contact,
+          leadId: contact.leadId,
           enrollmentId: enrollment?.id,
           subject: `Re: ${message.subject}`.replace(/^(Re:\s*)+/i, "Re: ").slice(0, 200),
           body: action.message.body,
@@ -617,6 +633,7 @@ async function sendDue(args: PhaseArgs & { transport: Transport }): Promise<void
     const outcome = await deliver({
       ...args,
       contact: enrollment.contact,
+      leadId: enrollment.leadId,
       enrollmentId: enrollment.id,
       subject: drafted.message.subject,
       body: drafted.message.body,
@@ -650,6 +667,8 @@ async function sendDue(args: PhaseArgs & { transport: Transport }): Promise<void
 async function deliver(args: PhaseArgs & {
   transport: Transport;
   contact: { id: string; email: string; deliverability: string | null };
+  /** The lead this contact belongs to, for billing. */
+  leadId?: string;
   enrollmentId?: string;
   subject: string;
   body: string;
@@ -730,12 +749,29 @@ async function deliver(args: PhaseArgs & {
     return "failed";
   }
 
-  await db.message.create({
+  const stored = await db.message.create({
     // The tick's clock, not the wall clock. They are the same in production
     // and differ in a replay or a pinned-clock demo, where a message dated
     // "now" would fall outside the day the caps are counted over.
     data: { ...common, status: "sent", sentAt: now, messageId: result.messageId, inReplyTo: args.inReplyTo },
   });
+
+  // Billing is raised from the send, not from the draft, and the unique
+  // constraint on (client, lead, kind) makes the first touch the only one
+  // that charges — so a four-touch sequence is one contact delivered.
+  // Charging per message would pay the operator to send a fourth email to
+  // somebody who ignored three, which is the behaviour this product's own
+  // gates exist to prevent.
+  if (!args.isReply && args.leadId) {
+    await billContactDelivered({
+      campaignId: campaign.id,
+      clientId: campaign.clientId,
+      leadId: args.leadId,
+      messageId: stored.id,
+      toEmail: args.contact.email,
+      sentAt: now,
+    });
+  }
   return "sent";
 }
 

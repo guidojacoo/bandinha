@@ -8,8 +8,11 @@ import { budgetSummary, utcDay } from "../../../core/budget";
 import { STAGE_LABEL } from "../../../components/ui";
 import { Empty, FitBadge, Metric, Pill, SectionHead, StageBadge, ago, clock } from "../../../components/ui";
 import {
-  armLiveSending, disarmLiveSending, runTick, setStatus, updateIcp, updateTargets,
+  armLiveSending, assignClient, disarmLiveSending, runTick, setStatus,
+  updateIcp, updateTargets,
 } from "../../actions";
+import { formatMoney } from "../../../core/billing";
+import { monthToDate } from "../../../agent/billing";
 import type {
   DealStage, FitResult, Icp, LeadProfile, Offering, ProvenanceRecord, ReplyAnalysis, SenderIdentity,
 } from "../../../core/types";
@@ -44,6 +47,9 @@ export default async function CampaignPage({
   const offering = fromJson<Offering | null>(campaign.offering, null);
   const icp = fromJson<Icp | null>(campaign.icp, null);
   const sender = fromJson<SenderIdentity | null>(campaign.senderIdentity, null);
+
+  const clients = await db.client.findMany({ where: { userId: session.userId }, orderBy: { name: "asc" } });
+  const billed = campaign.clientId ? await monthToDate(campaign.clientId) : null;
 
   const [leads, messages, deals, events, escalations, runs, pipeline, ledger, suppressions] = await Promise.all([
     db.lead.findMany({
@@ -441,6 +447,28 @@ export default async function CampaignPage({
                 No model calls today. Either no key is set, or every message so far was written deterministically.
               </p>
             )}
+          </div>
+
+          <div className="card" style={{ marginTop: 14 }}>
+            <h3>Who gets billed</h3>
+            <form action={assignClient}>
+              <input type="hidden" name="campaignId" value={campaign.id} />
+              <div className="field">
+                <label htmlFor="clientId">Client</label>
+                <select id="clientId" name="clientId" defaultValue={campaign.clientId ?? ""}>
+                  <option value="">Nobody — measurement only</option>
+                  {clients.map((client) => (
+                    <option key={client.id} value={client.id}>{client.name}</option>
+                  ))}
+                </select>
+                <div className="help">
+                  {billed
+                    ? <>Month to date: <strong>{formatMoney(billed.invoice.totalCents, billed.invoice.currency)}</strong> from this client&apos;s campaigns. <a href="/billing">Billing</a></>
+                    : <>Nothing is billed for this campaign. <a href="/billing">Set up a client</a> to charge per contact or per sale.</>}
+                </div>
+              </div>
+              <button className="ghost" type="submit">Save</button>
+            </form>
           </div>
 
           <div className="card" style={{ marginTop: 14 }}>

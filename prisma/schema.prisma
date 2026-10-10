@@ -33,14 +33,94 @@ model User {
 
   campaigns    Campaign[]
   suppressions Suppression[]
+  clients      Client[]
 
   @@map("users")
+}
+
+/// Who gets the invoice.
+///
+/// Running the agent for somebody else and billing them for what it produced
+/// is the commercial shape this makes possible, as an alternative to paying
+/// $36k a year for a seat. For a single operator selling their own thing, the
+/// client is themselves and the pricing is just measurement.
+model Client {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name           String
+  contactEmail   String?
+  /// Where the invoice is addressed.
+  billingAddress String?
+
+  /// JSON: PricingTerms. Prices in cents, share in basis points.
+  terms String?
+
+  /// Shared secret for the payment webhook, which is the only thing allowed
+  /// to mark a deal won. Rotatable without touching anything else.
+  webhookSecret String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  campaigns Campaign[]
+  events    BillableEvent[]
+
+  @@index([userId, createdAt])
+  @@map("clients")
+}
+
+/// One proven, chargeable thing that happened.
+///
+/// Append-only, and raised only from facts the system holds the evidence for:
+/// a message that actually sent, a reply a human wrote, a meeting a person
+/// confirmed, a deal a payment closed. The unique constraints are what stop
+/// the same thing being billed twice — which matters more here than anywhere
+/// else in the schema, because double-billing a client is unrecoverable in a
+/// way a duplicate log line is not.
+model BillableEvent {
+  id         String   @id @default(cuid())
+  clientId   String
+  client     Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  leadId     String
+  lead       Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  /// contact_delivered | reply_received | meeting_confirmed | deal_won
+  kind String
+  /// When the thing happened, not when it was recorded.
+  occurredAt DateTime
+  /// What the system holds as proof, shown on the invoice.
+  evidence String
+  /// The message or deal this is derived from, for the audit trail.
+  messageId String?
+  /// Deal value in cents, for a share-priced win.
+  valueCents Int?
+
+  /// Stamped when it appears on an issued invoice.
+  invoicedAt  DateTime?
+  invoiceRef  String?
+
+  createdAt DateTime @default(now())
+
+  /// One charge per lead per unit kind. A four-touch sequence is one contact
+  /// delivered, not four, and a prospect who replies twice is one reply.
+  @@unique([clientId, leadId, kind])
+  @@index([clientId, occurredAt])
+  @@index([campaignId, kind])
+  @@map("billable_events")
 }
 
 model Campaign {
   id     String @id @default(cuid())
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Who to bill for what this campaign produces. Null means nobody is billed.
+  clientId String?
+  client   Client? @relation(fields: [clientId], references: [id], onDelete: SetNull)
 
   /// The one input: the seller's own website.
   sourceUrl String
@@ -74,8 +154,10 @@ model Campaign {
   deals       Deal[]
   events      Event[]
   runs        AgentRun[]
+  billable    BillableEvent[]
 
   @@index([userId, createdAt])
+  @@index([clientId, createdAt])
   @@map("campaigns")
 }
 
@@ -106,6 +188,7 @@ model Lead {
   contacts    Contact[]
   enrollments Enrollment[]
   deals       Deal[]
+  billable    BillableEvent[]
 
   @@unique([campaignId, domain])
   @@index([campaignId, status])
@@ -238,6 +321,14 @@ model Deal {
   valueCents Int?
   notes      String?
   lostReason String?
+
+  /// Set by a person, in the console. The classifier reading a reply as a
+  /// meeting request is not enough to bill a client for one.
+  meetingConfirmedAt DateTime?
+  /// How the deal was closed: "payment" | "operator". Never by the agent.
+  closedBy           String?
+  /// The payment reference, when a webhook closed it.
+  paymentReference   String?
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
