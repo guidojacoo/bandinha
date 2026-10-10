@@ -1,0 +1,128 @@
+# Mercurio on GitHub Actions.
+#
+# Copy to .github/workflows/mercurio.yml, set the secrets below, and replace
+# CAMPAIGN_ID. Free on the Actions free tier; a tick takes well under a
+# minute of runner time.
+#
+# IMPORTANT: do not run this on a public repository. The database it commits
+# holds prospect addresses and the bodies of messages sent to them.
+name: Mercurio agent
+
+on:
+  schedule:
+    # Every two hours during European business hours, weekdays. The send
+    # window and the daily cap control volume; this only controls how often
+    # the agent gets a chance to act.
+    - cron: "17 7-17/2 * * 1-5"
+  workflow_dispatch:
+
+# One run at a time. The agent takes its own lock as well, but a queued
+# workflow is tidier than a skipped tick.
+concurrency:
+  group: mercurio-agent
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The state branch carries the database between runs.
+          ref: mercurio-state
+          # Fall back to the default branch on the very first run, when the
+          # state branch does not exist yet.
+          fetch-depth: 1
+        continue-on-error: true
+
+      - name: Check out the code
+        uses: actions/checkout@v4
+        with:
+          path: code
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: code/package-lock.json
+
+      - name: Install
+        working-directory: code
+        run: npm ci
+
+      - name: Restore the database
+        run: |
+          mkdir -p code/data
+          if [ -f data/mercurio.db ]; then
+            cp data/mercurio.db code/data/mercurio.db
+            echo "Restored $(du -h data/mercurio.db | cut -f1) of state."
+          else
+            echo "No previous state; this is the first run."
+          fi
+
+      - name: Apply any schema changes
+        working-directory: code
+        env:
+          DATABASE_URL: file:./data/mercurio.db
+        run: npx prisma db push --skip-generate --accept-data-loss
+
+      - name: Run one tick
+        working-directory: code
+        env:
+          DATABASE_URL: file:./data/mercurio.db
+          AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          IMAP_HOST: ${{ secrets.IMAP_HOST }}
+          IMAP_USER: ${{ secrets.IMAP_USER }}
+          IMAP_PASS: ${{ secrets.IMAP_PASS }}
+          # Optional discovery configuration.
+          DIRECTORY_URLS: ${{ secrets.DIRECTORY_URLS }}
+          SEED_DOMAINS: ${{ secrets.SEED_DOMAINS }}
+        # The tick's own exit code matters: a failure should show up red
+        # rather than being swallowed by the commit step that follows.
+        run: npm run agent -- CAMPAIGN_ID
+
+      - name: Save the database back
+        if: always()
+        run: |
+          cd code
+          STATE=$(mktemp -d)
+          cp data/mercurio.db "$STATE/"
+          cd ..
+          git config user.name "mercurio[bot]"
+          git config user.email "mercurio@users.noreply.github.com"
+          git checkout -B mercurio-state
+          mkdir -p data
+          cp "$STATE/mercurio.db" data/mercurio.db
+          git add data/mercurio.db
+          # Nothing to commit is the normal case on a quiet tick.
+          git diff --cached --quiet && echo "No state change." && exit 0
+          git commit -m "Agent state after $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push --force-with-lease origin mercurio-state
+
+      - name: What it did
+        if: always()
+        working-directory: code
+        env:
+          DATABASE_URL: file:./data/mercurio.db
+        # The outbox is the proof in dry-run mode, and worth keeping.
+        run: |
+          if [ -d outbox ]; then ls -1 outbox/*.eml 2>/dev/null | wc -l | xargs echo "messages in outbox:"; fi
+
+      - name: Keep the dry-run outbox
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: outbox
+          path: code/outbox
+          if-no-files-found: ignore
+          retention-days: 14

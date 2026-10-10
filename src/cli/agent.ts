@@ -1,5 +1,6 @@
 import { db } from "../infra/db";
 import { tick, pipelineSummary, type TickSummary } from "../agent/orchestrator";
+import { withLock } from "../infra/lock";
 import { colour, heading, llmForRun, requireDatabase, fatal, run } from "./lib";
 import { dnsUsable } from "./lib";
 
@@ -14,6 +15,15 @@ import { dnsUsable } from "./lib";
  */
 
 const IDLE_TICKS_BEFORE_STOPPING = 3;
+
+/**
+ * How many failures in a row before giving up.
+ *
+ * A loop that retries forever on a broken campaign looks identical to one
+ * that is working, which is the worst property an unattended process can
+ * have. Three strikes, with backoff between them, then stop loudly.
+ */
+const MAX_CONSECUTIVE_FAILURES = Number(process.env.AGENT_MAX_FAILURES ?? 3);
 
 run(async () => {
   await requireDatabase();
@@ -40,22 +50,73 @@ run(async () => {
     console.log(colour.dim("No DNS resolver here, so addresses are marked unchecked rather than verified.\n"));
   }
 
+  /**
+   * One tick, under a lock.
+   *
+   * The lock is what makes this safe to put in a cron entry. A schedule that
+   * fires every ten minutes against a tick that occasionally takes twelve
+   * will overlap, and two overlapping ticks both read "sent today: 4", both
+   * decide there is room, and quietly double the daily cap, the per-domain
+   * cap and the anti-pester gap. Every one of those is a deliberate
+   * protection and they are worth nothing if a second process walks past.
+   */
+  const runOnce = async (label: string) => {
+    const outcome = await withLock(campaignId, label, () =>
+      tick({
+        campaignId,
+        llm,
+        useDns,
+        onProgress: (message) => console.log(`  ${message}`),
+      }));
+
+    if (!outcome.ran) {
+      console.log(colour.yellow(`  Another tick is already running: ${outcome.heldBy}, since ${outcome.since.toISOString()}.`));
+      console.log(colour.dim("  Skipped rather than queued — overlapping ticks double every send cap."));
+      return null;
+    }
+    return outcome.result;
+  };
+
+  if (!loop) {
+    heading("One tick");
+    const summary = await runOnce("one-shot");
+    if (summary) console.log(`\n  ${describe(summary)}`);
+    await showPipeline(campaignId);
+    return;
+  }
+
+  // --- the loop ---------------------------------------------------------
   let idle = 0;
-  for (let ticks = 0; ticks < (loop ? maxTicks : 1); ticks++) {
-    heading(`Tick ${ticks + 1}${loop ? ` of up to ${maxTicks}` : ""}`);
+  let consecutiveFailures = 0;
 
-    const summary = await tick({
-      campaignId,
-      llm,
-      useDns,
-      onProgress: (message) => console.log(`  ${message}`),
-    });
+  for (let ticks = 0; ticks < maxTicks; ticks++) {
+    heading(`Tick ${ticks + 1} of up to ${maxTicks}`);
 
-    console.log(`\n  ${describe(summary)}`);
+    let summary: Awaited<ReturnType<typeof tick>> | null = null;
+    try {
+      summary = await runOnce(`loop tick ${ticks + 1}`);
+      consecutiveFailures = 0;
+    } catch (error) {
+      consecutiveFailures += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      console.log(colour.red(`  Tick failed: ${message}`));
 
-    if (!loop) break;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        fatal(`${consecutiveFailures} ticks failed in a row. Stopping rather than looping on a broken campaign — the last error was: ${message}`);
+      }
 
-    if (didNothing(summary)) {
+      // Exponential backoff, because the usual cause is something that needs
+      // time (a rate limit, a mailbox that is down) and retrying hard makes
+      // every one of those worse.
+      const backoff = Math.min(15 * 60_000, intervalMs * 2 ** consecutiveFailures);
+      console.log(colour.dim(`  Waiting ${Math.round(backoff / 1000)}s before trying again (failure ${consecutiveFailures} of ${MAX_CONSECUTIVE_FAILURES}).`));
+      await sleep(backoff);
+      continue;
+    }
+
+    if (summary) console.log(`\n  ${describe(summary)}`);
+
+    if (summary && didNothing(summary)) {
       idle += 1;
       if (idle >= IDLE_TICKS_BEFORE_STOPPING) {
         console.log(colour.dim(`\n  Nothing to do for ${idle} ticks — stopping rather than spinning.`));
@@ -68,6 +129,10 @@ run(async () => {
     await sleep(intervalMs);
   }
 
+  await showPipeline(campaignId);
+});
+
+async function showPipeline(campaignId: string): Promise<void> {
   const pipeline = await pipelineSummary(campaignId);
   heading("Pipeline");
   for (const [stage, count] of Object.entries(pipeline.byStage)) {
@@ -78,7 +143,7 @@ run(async () => {
     console.log(colour.dim("  Those are commitments, pricing questions and referrals — the agent will not answer them itself."));
   }
   console.log();
-});
+}
 
 function describe(summary: TickSummary): string {
   const parts = [
@@ -95,7 +160,10 @@ function describe(summary: TickSummary): string {
     summary.failed > 0 ? colour.red(`${summary.failed} failed`) : "",
   ].filter(Boolean);
   const body = parts.length > 0 ? parts.join(", ") : colour.dim("nothing to do");
-  return `${body}  ${colour.dim(`· ${summary.llm}`)}`;
+  const warmup = summary.warmup && summary.warmup.stage !== "warm"
+    ? colour.dim(` · ${summary.warmup.stage}: ${summary.warmup.dailyCap}/day`)
+    : "";
+  return `${body}  ${colour.dim(`· ${summary.llm}`)}${warmup}`;
 }
 
 function didNothing(summary: TickSummary): boolean {

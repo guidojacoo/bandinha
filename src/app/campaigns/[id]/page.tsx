@@ -12,7 +12,10 @@ import {
   updateIcp, updateTargets,
 } from "../../actions";
 import { formatMoney } from "../../../core/billing";
+import { describeRate } from "../../../core/warmup";
 import { monthToDate } from "../../../agent/billing";
+import { warmupFor, defaultCompliance } from "../../../agent/orchestrator";
+import { peek } from "../../../infra/lock";
 import type {
   DealStage, FitResult, Icp, LeadProfile, Offering, ProvenanceRecord, ReplyAnalysis, SenderIdentity,
 } from "../../../core/types";
@@ -50,6 +53,15 @@ export default async function CampaignPage({
 
   const clients = await db.client.findMany({ where: { userId: session.userId }, orderBy: { name: "asc" } });
   const billed = campaign.clientId ? await monthToDate(campaign.clientId) : null;
+
+  const configuredCap = sender
+    ? { ...defaultCompliance(sender), ...fromJson<{ dailySendCap?: number }>(campaign.complianceConfig, {}) }.dailySendCap
+    : 30;
+  const [warmup, lock] = await Promise.all([
+    warmupFor(campaign.id, configuredCap),
+    // Read-only: looking must not become the thing that stops a tick.
+    peek(campaign.id),
+  ]);
 
   const [leads, messages, deals, events, escalations, runs, pipeline, ledger, suppressions] = await Promise.all([
     db.lead.findMany({
@@ -147,6 +159,28 @@ export default async function CampaignPage({
         )}
       </div>
 
+      {lock.held && (
+        <div className="banner good">
+          A tick is running right now — {lock.by}. Overlapping ticks would double every send cap, so a second
+          one skips rather than queues.
+        </div>
+      )}
+
+      {warmup.stage === "halted" && (
+        <div className="banner bad">
+          <div>
+            <strong>Sending is stopped.</strong> {warmup.reason}
+          </div>
+        </div>
+      )}
+      {warmup.stage === "throttled" && (
+        <div className="banner warn">
+          <div>
+            <strong>Volume halved.</strong> {warmup.reason}
+          </div>
+        </div>
+      )}
+
       <section>
         <div className="grid cols-4">
           <Metric value={enrolled.length} label="Being worked" hint={`of ${campaign.targetLeads} target`} tone={enrolled.length > 0 ? "good" : undefined} />
@@ -159,6 +193,35 @@ export default async function CampaignPage({
             hint={escalations.length > 0 ? "the agent will not answer these" : "nothing needs a person"}
           />
         </div>
+      </section>
+
+      <section>
+        <SectionHead
+          title="Sending reputation"
+          note="the damage a cold domain does is invisible for weeks, so the cap ramps"
+        />
+        <div className="grid cols-4">
+          <Metric
+            value={`${warmup.dailyCap}`}
+            label="Today's cap"
+            hint={`${warmup.remainingToday} left · configured ${configuredCap}`}
+            tone={warmup.stage === "halted" ? "bad" : warmup.stage === "throttled" ? "warn" : undefined}
+          />
+          <Metric value={warmup.stage.replace(/_/g, " ")} label="Stage" />
+          <Metric
+            value={describeRate(warmup.bounceRate, warmup.sampled)}
+            label="Bounces"
+            hint="over 2% halves the volume, over 5% stops it"
+            tone={warmup.sampled && warmup.bounceRate >= 0.02 ? "bad" : undefined}
+          />
+          <Metric
+            value={describeRate(warmup.complaintRate, warmup.sampled)}
+            label="Complaints"
+            hint="Gmail publishes 0.3% as the ceiling"
+            tone={warmup.sampled && warmup.complaintRate >= 0.0015 ? "bad" : undefined}
+          />
+        </div>
+        <p className="dim" style={{ fontSize: 12, marginTop: 10, marginBottom: 0 }}>{warmup.reason}</p>
       </section>
 
       {/* ── the queue that matters ─────────────────────────────────── */}

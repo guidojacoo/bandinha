@@ -11,6 +11,7 @@ import { converse } from "./converse";
 import { enrollmentEventFor, stageFor, summarise } from "./deals";
 import { qualify } from "./qualify";
 import { billContactDelivered, billReplyReceived } from "./billing";
+import { warmupVerdict, type SendingHistory, type WarmupVerdict } from "../core/warmup";
 import type { Llm } from "../infra/llm/types";
 import type { Inbox, Transport } from "../infra/transport/types";
 import type {
@@ -68,6 +69,8 @@ export interface TickSummary {
   /** Lines the operator sees. The agent explaining itself as it works. */
   log: string[];
   llm: string;
+  /** Today's sending allowance and why it is what it is. */
+  warmup?: WarmupVerdict;
 }
 
 export interface TickOptions {
@@ -120,6 +123,15 @@ export async function tick(options: TickOptions): Promise<TickSummary> {
     return summary;
   }
 
+  // The warmup verdict is computed once per tick and applied as the day's
+  // cap. A new sending domain that emits its full configured volume on day
+  // one is a new sending domain with a damaged reputation, and the damage is
+  // invisible for weeks.
+  const warmup = await warmupFor(campaign.id, context.compliance.dailySendCap);
+  context.compliance = { ...context.compliance, dailySendCap: warmup.dailyCap };
+  if (warmup.stage !== "warm") say(`Sending: ${warmup.reason}`);
+  summary.warmup = warmup;
+
   const run = await db.agentRun.create({ data: { campaignId: campaign.id } });
   const transport = options.transport ?? createTransport({ liveSending: campaign.liveSending });
   const inbox = options.inbox ?? createInbox();
@@ -158,6 +170,49 @@ interface CampaignContext {
   icp: Icp;
   sender: SenderIdentity;
   compliance: ComplianceConfig;
+}
+
+/**
+ * The domain's sending history, for the warmup ramp.
+ *
+ * Counted per campaign rather than per domain, which is the right scope for a
+ * single-operator tool: one campaign is one sending identity. An operator
+ * running several campaigns from one domain would want this widened, and the
+ * console says so.
+ */
+export async function warmupFor(campaignId: string, configuredCap: number): Promise<WarmupVerdict> {
+  const now = new Date();
+  const startOfDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+
+  const [first, totalSent, sentToday, bounced, complained] = await Promise.all([
+    db.message.findFirst({
+      where: { campaignId, direction: "outbound", status: "sent" },
+      orderBy: { sentAt: "asc" },
+      select: { sentAt: true },
+    }),
+    db.message.count({ where: { campaignId, direction: "outbound", status: "sent" } }),
+    db.message.count({ where: { campaignId, direction: "outbound", status: "sent", sentAt: { gte: startOfDay } } }),
+    db.enrollment.count({ where: { campaignId, state: "bounced" } }),
+    // Opt-outs and "not interested" both count: a receiving system cannot
+    // tell them apart, and neither can a reputation score.
+    db.suppression.count({
+      where: {
+        sourceCampaignId: campaignId,
+        reason: { in: ["unsubscribed", "complained", "not_interested"] },
+      },
+    }),
+  ]);
+
+  const history: SendingHistory = {
+    daysSending: first?.sentAt
+      ? Math.max(0, Math.floor((now.getTime() - first.sentAt.getTime()) / 86_400_000))
+      : 0,
+    totalSent,
+    totalBounced: bounced,
+    totalComplained: complained,
+    sentToday,
+  };
+  return warmupVerdict(configuredCap, history);
 }
 
 export function loadContext(campaign: {

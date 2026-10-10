@@ -48,6 +48,7 @@ So the design rule is *structurally incapable*, not *instructed not to*:
 | Free tiers run out | The day's token allowance is rationed per task, so extraction cannot starve a reply to a live prospect. | `src/core/budget.ts` |
 | Copy nobody would read | Eleven measured checks. A draft below the bar is rewritten against the checks it failed, best-of-N, and the template competes on the same score. | `src/core/quality.ts` |
 | Billing a client for nothing | A unit is chargeable only when the evidence for it is in the database. A meeting needs a person; a win needs a payment. | `src/core/billing.ts` |
+| A burned sending domain | The daily cap ramps over four weeks and throttles itself on bounces and complaints. | `src/core/warmup.ts` |
 | Paid data vendors | Ten free discovery sources, routed by what the ICP actually is. | `src/infra/sources/` |
 
 ---
@@ -148,6 +149,7 @@ npm run dev    # http://localhost:3000
 ```bash
 npm run sell -- https://your-company.com
 npm run agent -- <campaignId> --loop
+npm run health                        # is anything wrong, is anything waiting
 ```
 
 `npm run sell` reads your site, prints the offer and the ICP it derived, asks
@@ -163,6 +165,40 @@ environment variable should not mail three hundred strangers.
 
 `npm run doctor` tells you what works on your machine and what does not —
 every check is run live rather than inferred from configuration.
+
+### Leaving it running
+
+`deploy/` has cron, systemd and GitHub Actions recipes, all free. Three things
+make unattended running safe, and they matter more than the scheduler you pick:
+
+**A lock.** Every tick takes a per-campaign lock first. A schedule firing
+every ten minutes against a tick that occasionally takes twelve *will*
+overlap, and two overlapping ticks both read "sent today: 4", both decide
+there is room, and quietly double the daily cap, the per-domain cap and the
+anti-pester gap. A second tick finding the lock held skips rather than queues,
+and says so.
+
+**A warmup ramp.** The daily cap is not a constant. It starts at 15% of what
+you configured, reaches the full figure over about four weeks, halves itself
+when bounces pass 2% or complaints pass 0.15%, and stops entirely at 5% and
+0.3% — the last of which is Gmail's published number and the one figure in
+deliverability that is not folklore. A new domain that sends its full volume
+on day one is a new domain with a damaged reputation, and the damage is
+invisible for weeks: by the time the reply rate drops, the mail has been going
+to spam for a fortnight and the only fix is a new domain.
+
+A verdict never blocks a *reply*. A halt is about not sending unwanted mail to
+strangers; somebody who wrote to you and is waiting is the opposite case.
+
+**A failure ceiling.** `--loop` stops after three consecutive failures, with
+exponential backoff between them. A loop that retries forever on a broken
+campaign looks identical to one that is working, which is the worst property
+an unattended process can have.
+
+`npm run health` answers the only two questions that matter once it is on a
+timer — is anything wrong, and is anything waiting for a person — and exits
+non-zero when the answer is yes, so a monitoring check can watch it rather
+than parse it.
 
 ---
 
@@ -461,10 +497,12 @@ src/core/        pure: no network, no database, no clock except one passed in
   icp.ts           who buys this, and which free sources can find them
   budget.ts        how much of today's free tier is left, per task
   quality.ts       is this copy worth reading? eleven measured checks
+  warmup.ts        how much may go out today without burning the domain
   billing.ts       what may be charged for, and the evidence each unit needs
 
 src/infra/       everything that touches the outside world
   http.ts          the only place that calls fetch: robots, delays, size caps
+  lock.ts          so two ticks cannot double-send
   extract.ts       HTML into facts (pure, so every rule is testable)
   crawler.ts       a polite, budgeted, priority-ordered site crawler
   dns.ts           MX lookups
@@ -484,8 +522,9 @@ src/agent/       the pipeline
 
 src/app/         the operator console (Next.js)
 src/cli/         setup, sell, agent, demo, doctor, discover
+deploy/          cron, systemd and GitHub Actions recipes, all free
 fixtures/        ten sites, five scripted buyers, and a server that speaks Groq
-test/            565 tests
+test/            607 tests
 ```
 
 The split is the point. Everything that has to be *right* — who may be
@@ -500,7 +539,7 @@ against the protocol server, and `payments` exercises the only route that can
 record money, against a throwaway database rather than yours.
 
 ```bash
-npm test         # 565 tests, ~14s
+npm test         # 607 tests, ~17s
 npm run typecheck
 ```
 
@@ -523,7 +562,7 @@ marked as such everywhere they appear. The pure core, the npm, directory and
 seed sources, the crawler, the extractor, the full agent pipeline, the model
 client against Groq's protocol, the quality scorer, the billing layer, the
 payment webhook, the dry-run transport and the console are all proven end to
-end by `npm run demo`, `npm run discover` and 565 tests.
+end by `npm run demo`, `npm run discover` and 607 tests.
 
 And one thing worth saying plainly about the copy: it is measured, and
 measuring is not the same as selling. The scorer encodes what is known to

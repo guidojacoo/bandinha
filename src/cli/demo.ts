@@ -112,6 +112,12 @@ run(async () => {
       status: "running",
       offering: toJson(offering),
       icp: toJson({ ...icp, preferredSources: ["seed"], sourceHints: { seed: [] } }),
+      // A cap of 60 so the warmup ramp is visibly in effect — day one allows
+      // 15% of it, which is nine, exactly the number of fixture prospects.
+      // Picking 30 here would have the ramp cap the run at four and the rest
+      // of the loop would never execute, which demonstrates the ramp and
+      // nothing else.
+      complianceConfig: toJson({ dailySendCap: 60 }),
       senderIdentity: toJson({
         fromName: "Dana Reyes",
         fromEmail: "dana@northwind.test",
