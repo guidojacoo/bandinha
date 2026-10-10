@@ -2,17 +2,18 @@ import type { Icp } from "../../core/types";
 import type { SourceId } from "../../core/icp";
 import { directorySource } from "./directory";
 import { githubSource } from "./github";
-import { npmSource } from "./npm";
+import { REGISTRY_SOURCES } from "./registries";
 import { osmSource } from "./osm";
 import { searchSource } from "./search";
 import { seedSource } from "./seed";
 import { dedupeCandidates, type DiscoveryOutput, type ProspectCandidate, type ProspectSource } from "./types";
 
 export * from "./types";
-export { directorySource, githubSource, npmSource, osmSource, searchSource, seedSource };
+export * from "./registries";
+export { directorySource, githubSource, osmSource, searchSource, seedSource };
 
 export const ALL_SOURCES: ProspectSource[] = [
-  githubSource, npmSource, osmSource, directorySource, searchSource, seedSource,
+  githubSource, ...REGISTRY_SOURCES, osmSource, directorySource, searchSource, seedSource,
 ];
 
 const BY_ID = new Map<SourceId, ProspectSource>(ALL_SOURCES.map((s) => [s.id, s]));

@@ -143,7 +143,8 @@ export function competitorPhrases(offering: Offering, limit = 10): string[] {
 // ---------------------------------------------------------------------------
 
 export type SourceId =
-  | "github" | "npm" | "pypi" | "osm" | "directory" | "search" | "seed";
+  | "github" | "npm" | "rubygems" | "crates" | "hex" | "packagist"
+  | "osm" | "directory" | "search" | "seed";
 
 /**
  * Which free sources can plausibly find this ICP, and what to ask them.
@@ -158,6 +159,38 @@ interface SourceProfile {
   cues: RegExp;
   /** Where its queries come from. */
   hint: (offering: Offering, icp: Partial<Icp>) => string[];
+}
+
+/**
+ * The package registries, and the words that mean one is worth asking first.
+ *
+ * npm is the default simply because it is an order of magnitude larger than
+ * the rest; the others win when the seller's own copy says which ecosystem it
+ * lives in. A Laravel vendor's buyers publish on Packagist, and asking npm
+ * first wastes the run's best queries on the wrong market.
+ */
+const REGISTRY_ECOSYSTEM_CUES: Array<{ id: SourceId; cues: RegExp }> = [
+  { id: "npm", cues: /\b(npm|node\.?js|javascript|typescript|react|next\.?js|vue|angular|svelte|deno|bun|frontend|web app)\b/i },
+  { id: "packagist", cues: /\b(php|composer|packagist|laravel|symfony|wordpress|woocommerce|drupal|magento)\b/i },
+  { id: "rubygems", cues: /\b(ruby|rubygems|rails|ruby on rails|sidekiq|hotwire|sinatra)\b/i },
+  { id: "crates", cues: /\b(rust|crates?\.io|cargo|tokio|wasm|webassembly)\b/i },
+  { id: "hex", cues: /\b(elixir|erlang|hex\.pm|phoenix|beam|otp)\b/i },
+];
+
+const REGISTRY_IDS: SourceId[] = REGISTRY_ECOSYSTEM_CUES.map((entry) => entry.id);
+
+/**
+ * Orders the registries by which ecosystem the seller actually sells into.
+ *
+ * Named cues beat size: a seller whose site says "Laravel" gets Packagist
+ * first even though npm is larger, because npm's answer to a Laravel query is
+ * mostly noise. With nothing to go on, the order is by registry size, since
+ * recall is what matters when precision has nothing to work with.
+ */
+export function rankRegistries(haystack: string): SourceId[] {
+  const named = REGISTRY_ECOSYSTEM_CUES.filter((entry) => entry.cues.test(haystack)).map((entry) => entry.id);
+  const rest = REGISTRY_IDS.filter((id) => !named.includes(id));
+  return [...named, ...rest];
 }
 
 const DEV_CUES =
@@ -188,20 +221,24 @@ const SOURCE_PROFILES: SourceProfile[] = [
       ...technologyTerms(offering),
     ]).slice(0, 12),
   },
-  {
-    id: "npm",
-    // Deliberately the full developer cue, not just the JavaScript one. The
-    // question is not "does the seller talk about npm" but "do its buyers
-    // publish packages", and for any developer tool they do. Routing an
-    // observability ICP away from npm because its own copy never says
-    // "javascript" skipped the only discovery source proven to work.
+  // Package registries. Every one of them is asked for a developer ICP, but
+  // the order matters: a seller of a Rails tool should ask RubyGems before
+  // npm, and `rankRegistries` below does that from the seller's own words.
+  //
+  // Deliberately the full developer cue, not the per-language one. The
+  // question is not "does the seller talk about npm" but "do its buyers
+  // publish packages", and for any developer tool they do. Routing an
+  // observability ICP away from npm because its own copy never said
+  // "javascript" once skipped the only discovery source proven to work.
+  ...REGISTRY_IDS.map((id): SourceProfile => ({
+    id,
     cues: DEV_CUES,
     hint: (offering, icp) => uniqueLower([
       ...technologyTerms(offering),
       ...offering.categories,
       ...(icp.positiveSignals ?? []).filter((s) => DEV_CUES.test(s)),
     ]).slice(0, 10),
-  },
+  })),
   {
     id: "osm",
     cues: LOCAL_CUES,
@@ -317,6 +354,20 @@ export function routeSources(
     if (hints.length === 0 && profile.id !== "seed") continue;
     preferredSources.push(profile.id);
     sourceHints[profile.id] = hints;
+  }
+
+  // Registries are ordered by ecosystem rather than by their position in
+  // SOURCE_PROFILES, so a Rails seller asks RubyGems first.
+  const registryOrder = rankRegistries(haystack);
+  const registries = preferredSources.filter((id) => REGISTRY_IDS.includes(id as SourceId));
+  if (registries.length > 1) {
+    const ranked = registryOrder.filter((id) => registries.includes(id));
+    let slot = 0;
+    for (let i = 0; i < preferredSources.length; i++) {
+      if (REGISTRY_IDS.includes(preferredSources[i] as SourceId)) {
+        preferredSources[i] = ranked[slot++] ?? preferredSources[i]!;
+      }
+    }
   }
 
   preferredSources.push("seed");

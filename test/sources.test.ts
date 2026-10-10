@@ -2,10 +2,14 @@ import { describe, expect, it } from "vitest";
 import { brandOf, companyDomainOf, dedupeCandidates, isPlatformHost, registrableDomain, type ProspectCandidate } from "../src/infra/sources/types";
 import { harvestOutboundLinks } from "../src/infra/sources/directory";
 import { extractDomains, extractTargets } from "../src/infra/sources/seed";
-import { buildQueries as buildNpmQueries } from "../src/infra/sources/npm";
+import {
+  buildQueries as buildRegistryQueries, createRegistrySource, cratesAdapter,
+  hexAdapter, npmAdapter, packagistAdapter, rubygemsAdapter,
+} from "../src/infra/sources/registries";
 import { buildQueries as buildGithubQueries } from "../src/infra/sources/github";
 import { buildQuery as buildOverpassQuery } from "../src/infra/sources/osm";
 import { describeSources, sourceById, ALL_SOURCES } from "../src/infra/sources";
+import { rankRegistries } from "../src/core/icp";
 import { icp } from "./factories";
 
 describe("registrableDomain", () => {
@@ -177,15 +181,15 @@ describe("query building", () => {
     exclude: new Set<string>(),
   };
 
-  it("builds npm queries as term pairs, not one long string", () => {
-    const queries = buildNpmQueries(input);
+  it("builds registry queries as single terms and pairs, not one long string", () => {
+    const queries = buildRegistryQueries(input);
     expect(queries.length).toBeGreaterThan(1);
-    expect(queries.every((q) => q.split(" ").length <= 2)).toBe(true);
+    expect(queries.every((query: string) => query.split(" ").length <= 2)).toBe(true);
   });
 
   it("builds nothing from an ICP with no keywords", () => {
     const empty = { ...input, hints: [], icp: icp({ positiveSignals: [], industries: [] }) };
-    expect(buildNpmQueries(empty)).toEqual([]);
+    expect(buildRegistryQueries(empty)).toEqual([]);
     expect(buildGithubQueries(empty)).toEqual([]);
   });
 
@@ -259,5 +263,183 @@ describe("extractTargets", () => {
 
   it("keeps a path, so a seed entry can point at a subsection", () => {
     expect(extractTargets("https://acme.test/engineering")[0]?.url).toBe("https://acme.test/engineering");
+  });
+});
+
+describe("the package registries", () => {
+  const ADAPTERS = [npmAdapter, packagistAdapter, rubygemsAdapter, cratesAdapter, hexAdapter];
+
+  it("all five are proven and say what they cover", () => {
+    for (const adapter of ADAPTERS) {
+      expect(adapter.confidence).toBe("proven");
+      expect(adapter.coverage.length).toBeGreaterThan(40);
+      expect(adapter.ecosystem).toBeTruthy();
+    }
+  });
+
+  it("none of them can recommend its own documentation site as a lead", () => {
+    // Every one of these arrived as a "company homepage" in a live run: a
+    // gem whose homepage is its own RubyDoc page, a crate pointing at
+    // docs.rs, Hex packages pointing at HexDocs.
+    //
+    // Asserted against the *global* platform list rather than each adapter's
+    // own, which is the stronger invariant: a registry's own host can never
+    // leak through any source, not only through itself.
+    for (const adapter of ADAPTERS) {
+      for (const host of adapter.ownHosts ?? []) {
+        expect(companyDomainOf(`https://${host}/some/package`), `${adapter.id} → ${host}`).toBeNull();
+      }
+    }
+  });
+
+  it("asks for a result count where the registry supports one", () => {
+    for (const adapter of ADAPTERS) {
+      const url = adapter.searchUrl("observability", 25);
+      expect(url).toMatch(/^https:\/\//);
+      expect(url).toContain("observability");
+    }
+  });
+
+  it("escapes a query that would otherwise break the URL", () => {
+    for (const adapter of ADAPTERS) {
+      const url = new URL(adapter.searchUrl("error budget & slo?", 10));
+      // The query has to survive intact rather than being chopped at the &.
+      const values = [...url.searchParams.values()];
+      expect(values, adapter.id).toContain("error budget & slo?");
+    }
+  });
+
+  describe("parsing", () => {
+    it("reads an npm result", () => {
+      const hits = npmAdapter.parse({
+        objects: [{
+          package: {
+            name: "@acme/tracing", description: "Tracing for Acme.", date: "2026-08-01T00:00:00Z",
+            keywords: ["tracing"], links: { homepage: "https://acme.test/docs" },
+            author: { email: "dev@acme.test" },
+          },
+        }],
+      });
+      expect(hits[0]).toMatchObject({
+        name: "@acme/tracing", homepage: "https://acme.test/docs", contactEmail: "dev@acme.test",
+      });
+    });
+
+    it("reads a RubyGems result", () => {
+      const hits = rubygemsAdapter.parse([
+        { name: "acme-slo", info: "SLOs for Rails.", homepage_uri: "https://acme.test", version_created_at: "2026-07-01T00:00:00Z" },
+      ]);
+      expect(hits[0]).toMatchObject({ name: "acme-slo", homepage: "https://acme.test" });
+    });
+
+    it("reads a crates.io result", () => {
+      const hits = cratesAdapter.parse({
+        crates: [{ name: "acme-otel", description: "OTel for Acme.", homepage: "https://acme.test", keywords: ["otel"] }],
+      });
+      expect(hits[0]).toMatchObject({ name: "acme-otel", homepage: "https://acme.test" });
+    });
+
+    it("reads a Hex result, picking the website over the code host", () => {
+      const hits = hexAdapter.parse([
+        {
+          name: "acme_obs", updated_at: "2026-09-01T00:00:00Z",
+          meta: { description: "Observability for Acme.", links: { GitHub: "https://github.com/acme/obs", Website: "https://acme.test" } },
+        },
+      ]);
+      expect(hits[0]!.homepage).toBe("https://acme.test");
+    });
+
+    it("reads a Packagist result without mistaking the listing page for a homepage", () => {
+      const hits = packagistAdapter.parse({
+        results: [{
+          name: "acme/laravel-slo", description: "SLOs for Laravel.",
+          url: "https://packagist.org/packages/acme/laravel-slo",
+          repository: "https://github.com/acme/laravel-slo",
+        }],
+      });
+      expect(hits[0]!.homepage).toBeUndefined();
+      expect(hits[0]!.repository).toBe("https://github.com/acme/laravel-slo");
+    });
+
+    it("resolves a Packagist homepage and contact from the package document", () => {
+      // The one registry that publishes a named maintainer's address.
+      const hit = { name: "acme/laravel-slo" };
+      expect(packagistAdapter.detailUrl!(hit)).toBe("https://packagist.org/packages/acme/laravel-slo.json");
+
+      const enriched = packagistAdapter.parseDetail!({
+        package: {
+          name: "acme/laravel-slo",
+          versions: {
+            "1.0.0": { time: "2024-01-01T00:00:00Z", homepage: "https://old-domain.test" },
+            "2.0.0": { time: "2026-06-01T00:00:00Z", homepage: "https://acme.test/", authors: [{ name: "Ana", email: "ana@acme.test" }] },
+          },
+        },
+      }, hit);
+
+      // Newest first: an old release's homepage may be a domain they lost.
+      expect(enriched.homepage).toBe("https://acme.test/");
+      expect(enriched.contactEmail).toBe("ana@acme.test");
+    });
+
+    it("refuses a detail lookup for a name that is not vendor/package", () => {
+      expect(packagistAdapter.detailUrl!({ name: "../../etc/passwd" })).toBeNull();
+      expect(packagistAdapter.detailUrl!({ name: "no-slash" })).toBeNull();
+    });
+
+    it.each([
+      ["npm", npmAdapter], ["rubygems", rubygemsAdapter], ["crates", cratesAdapter],
+      ["hex", hexAdapter], ["packagist", packagistAdapter],
+    ] as const)("survives a %s response of the wrong shape", (_id, adapter) => {
+      for (const junk of [null, undefined, {}, [], "a string", { results: "not an array" }, { objects: [null] }]) {
+        expect(() => adapter.parse(junk)).not.toThrow();
+      }
+    });
+  });
+});
+
+describe("rankRegistries", () => {
+  it("sends a Laravel seller to Packagist before npm", () => {
+    // npm is larger, and its answer to a Laravel query is mostly noise.
+    expect(rankRegistries("A monitoring tool for Laravel and Symfony applications")[0]).toBe("packagist");
+  });
+
+  it("sends a Rails seller to RubyGems first", () => {
+    expect(rankRegistries("Error budgets for Ruby on Rails teams")[0]).toBe("rubygems");
+  });
+
+  it("sends a Rust seller to crates.io first", () => {
+    expect(rankRegistries("Zero-copy parsing for Rust and WebAssembly")[0]).toBe("crates");
+  });
+
+  it("defaults to npm when the seller names no ecosystem", () => {
+    expect(rankRegistries("Error budget tracking for platform teams")[0]).toBe("npm");
+  });
+
+  it("always returns every registry, so nothing is unreachable", () => {
+    for (const haystack of ["ruby", "php", "nothing in particular"]) {
+      expect(new Set(rankRegistries(haystack)).size).toBe(5);
+    }
+  });
+});
+
+describe("the contact paper trail", () => {
+  it("records the registry page that published an address", () => {
+    // "Where did you get my email" is a question with a legal answer, and
+    // `npm:acme.test` is not one.
+    expect(npmAdapter.packagePageUrl!({ name: "@acme/tracing" })).toBe("https://www.npmjs.com/package/@acme/tracing");
+    expect(rubygemsAdapter.packagePageUrl!({ name: "acme-slo" })).toBe("https://rubygems.org/gems/acme-slo");
+    expect(packagistAdapter.packagePageUrl!({ name: "acme/laravel-slo" })).toBe("https://packagist.org/packages/acme/laravel-slo");
+  });
+
+  it("builds a source from any adapter without touching the network to do it", () => {
+    // The factory is what makes adding a registry a fifteen-line adapter
+    // rather than a fifth copy of the same file.
+    const source = createRegistrySource({
+      ...npmAdapter, id: "npm", label: "Test Registry",
+      coverage: "A registry used only to prove the factory is generic enough.",
+    });
+    expect(source.label).toBe("Test Registry");
+    expect(source.confidence).toBe("proven");
+    expect(typeof source.discover).toBe("function");
   });
 });

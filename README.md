@@ -48,7 +48,7 @@ So the design rule is *structurally incapable*, not *instructed not to*:
 | Free tiers run out | The day's token allowance is rationed per task, so extraction cannot starve a reply to a live prospect. | `src/core/budget.ts` |
 | Copy nobody would read | Eleven measured checks. A draft below the bar is rewritten against the checks it failed, best-of-N, and the template competes on the same score. | `src/core/quality.ts` |
 | Billing a client for nothing | A unit is chargeable only when the evidence for it is in the database. A meeting needs a person; a win needs a payment. | `src/core/billing.ts` |
-| Paid data vendors | Six free discovery sources, routed by what the ICP actually is. | `src/infra/sources/` |
+| Paid data vendors | Ten free discovery sources, routed by what the ICP actually is. | `src/infra/sources/` |
 
 ---
 
@@ -277,12 +277,35 @@ source covers everyone, so `src/core/icp.ts` routes.
 
 | Source | What it covers | Status |
 |---|---|---|
-| **npm** | Companies publishing JavaScript or TypeScript packages. Strong for developer tools and infrastructure. | **Proven** |
+| **npm** | JavaScript and TypeScript. The largest registry by far. | **Proven** |
+| **Packagist** | PHP and Composer. Commercial, agency-heavy — and the only registry that publishes a named maintainer's address in the package itself. | **Proven** |
+| **RubyGems** | Ruby, which means Rails, which means a great many small businesses. | **Proven** |
+| **crates.io** | Rust. Small, and almost entirely infrastructure. | **Proven** |
+| **Hex.pm** | Elixir and Erlang. The smallest, with correspondingly little noise. | **Proven** |
 | **Directory pages** | Companies listed on pages you supply — association members, conference exhibitors, market roundups. One good page can yield fifty on-target domains. | **Proven** |
 | **Seed list** | Companies you already know about. Always last, cannot fail. | **Proven** |
 | **GitHub** | Organisations publishing code in the ICP's space. The richest source for a software ICP. | Built, untested |
 | **OpenStreetMap** | Local businesses with a mapped location: shops, clinics, restaurants, trades. | Built, untested |
 | **SearXNG** | Anything the web indexes. Broad coverage, low precision. Needs an instance; run your own. | Built, untested |
+
+The five registries are one code path with per-registry adapters, because the
+insight is identical in all five and the parts that are easy to get wrong —
+the company-domain filter, de-duplication, the staleness cutoff, refusing the
+registry's own documentation site as a "company homepage" — should be got
+right once. Adding a sixth is a fifteen-line adapter.
+
+**The order is chosen, not fixed.** A seller whose site says "Laravel" asks
+Packagist before npm: npm is an order of magnitude larger, and that does not
+help if it is larger in the wrong market. With no ecosystem named, the order
+is by registry size, because recall is what matters when precision has nothing
+to work with.
+
+A live run against an observability ICP found Pulumi, Langfuse, Backstage,
+Elastic, LaunchDarkly, Bugsnag, Treblle, Mirantis, Databricks and Spotify —
+fourteen of twenty-four with a maintainer's address published in the package
+metadata, which is a better lawful basis than a crawl, since the person chose
+to publish it. The page that published it is recorded with the address,
+because "where did you get my email" is a question with a legal answer.
 
 ### What "untested" means, precisely
 
@@ -303,6 +326,12 @@ where you are.
 path and the per-project JSON endpoint, and this crawler honours robots.txt, so
 there is no permitted search surface. Python-ecosystem prospects come from
 GitHub filtered by language instead.
+
+**crates.io was dropped and then recovered.** It was written off as returning
+403 to unauthenticated clients. It returns 403 to clients with no
+`User-Agent` — a different thing, and one this project's fetch path never
+does. "The API refused me" and "I asked badly" look identical from the
+outside.
 
 ---
 
@@ -440,7 +469,7 @@ src/infra/       everything that touches the outside world
   crawler.ts       a polite, budgeted, priority-ordered site crawler
   dns.ts           MX lookups
   llm/             Groq, where degrading is a first-class outcome
-  sources/         the six open-data prospect sources
+  sources/         ten open-data prospect sources; five are one adapter path
   transport/       outbox (default), SMTP, IMAP
   db.ts            SQLite via Prisma, plus the persistent token ledger
 
@@ -456,7 +485,7 @@ src/agent/       the pipeline
 src/app/         the operator console (Next.js)
 src/cli/         setup, sell, agent, demo, doctor, discover
 fixtures/        ten sites, five scripted buyers, and a server that speaks Groq
-test/            542 tests
+test/            565 tests
 ```
 
 The split is the point. Everything that has to be *right* — who may be
@@ -471,7 +500,7 @@ against the protocol server, and `payments` exercises the only route that can
 record money, against a throwaway database rather than yours.
 
 ```bash
-npm test         # 542 tests, ~14s
+npm test         # 565 tests, ~14s
 npm run typecheck
 ```
 
@@ -494,7 +523,7 @@ marked as such everywhere they appear. The pure core, the npm, directory and
 seed sources, the crawler, the extractor, the full agent pipeline, the model
 client against Groq's protocol, the quality scorer, the billing layer, the
 payment webhook, the dry-run transport and the console are all proven end to
-end by `npm run demo`, `npm run discover` and 542 tests.
+end by `npm run demo`, `npm run discover` and 565 tests.
 
 And one thing worth saying plainly about the copy: it is measured, and
 measuring is not the same as selling. The scorer encodes what is known to

@@ -133,18 +133,38 @@ if the corrections are visible next to it.
 Python counterpart to npm. Its `robots.txt` disallows both the search path and
 the per-project JSON endpoint, and this project's crawler honours robots.txt
 — so there is no permitted search surface. Python-ecosystem prospects come
-from GitHub filtered by language instead. crates.io returns 403 to an
-unauthenticated client and was dropped for the same kind of reason.
-Centralising every outbound request through one fetch path is what surfaced
-this before it shipped rather than after.
+from GitHub filtered by language instead.
 
-**npm turned out to be the strongest proven source, not a footnote.** It was
-listed third, after GitHub and Overpass. It is the one that worked end to end:
-a company publishing a package in your space has already told you that it
-exists, what it works on, and the domain of its website, and `links.homepage`
-on its own domain is the filter that separates a business from a weekend
-project. A live run against an observability ICP returned Pulumi, Langfuse,
-Mastra, Backstage, Pydantic, Spotify and Microsoft.
+**And crates.io was written off wrongly.** It was recorded above as returning
+403 to an unauthenticated client. It returns 403 to a client with no
+`User-Agent` — which is a different thing, and one this project's own fetch
+path never does. Re-probing it properly turned a dropped source into a
+working one. Worth recording as a reminder that "the API refused me" and "I
+asked badly" look identical from the outside.
+
+Centralising every outbound request through one fetch path is what surfaced
+both of these before they shipped rather than after.
+
+**Package registries turned out to be the strongest proven source, not a
+footnote.** They were listed third, after GitHub and Overpass. They are what
+worked end to end: a company publishing a package in your space has already
+told you that it exists, what it works on, and the domain of its website, and
+a homepage on its own domain is the filter that separates a business from a
+weekend project.
+
+It generalises further than expected. Five registries are reachable, keyless
+and documented — npm, Packagist, RubyGems, crates.io and Hex — and the insight
+is identical in all five, so they are one code path with per-registry
+adapters. A live run against an observability ICP returned Pulumi, Langfuse,
+Backstage, Elastic, LaunchDarkly, Bugsnag, Treblle, Mirantis, Databricks and
+Spotify, fourteen of them with a maintainer's address published in the package
+metadata — a better lawful basis than a crawl, since the person chose to
+publish it, as long as the paper trail is kept.
+
+The routing matters more than the count. A seller whose site says "Laravel"
+asks Packagist before npm, because npm's answer to a Laravel query is mostly
+noise, and npm being an order of magnitude larger does not help if it is
+larger in the wrong market.
 
 **"Free LLM tier" is a weaker claim than it looks, and that is fine.** The
 budget gate was designed for a tier that runs out. What the build showed is

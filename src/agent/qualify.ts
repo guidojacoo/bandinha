@@ -140,8 +140,16 @@ export function buildProfile(
     // Every page's markup, because `mailto:` links do not survive text
     // extraction and /contact and /team are where the people are.
     ...pages.flatMap((page) => extractContacts(html.get(page.url) ?? `${page.text}\n${page.chrome}`, page.url, candidate.domain)),
+    // An address the discovery source published, with the page that published
+    // it. Ranked below a named buyer found on their own site — a package
+    // maintainer is a real person who chose to publish that address, but
+    // they are usually not the person who buys things.
     ...(hints.contactEmail
-      ? [{ email: hints.contactEmail, source: `${candidate.via}:${candidate.domain}`, kind: "individual" as const }]
+      ? [{
+          email: hints.contactEmail,
+          source: hints.contactSource ?? `${candidate.via}:${candidate.domain}`,
+          kind: "individual" as const,
+        }]
       : []),
   ]);
 

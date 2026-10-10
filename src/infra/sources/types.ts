@@ -35,6 +35,15 @@ export interface ProspectCandidate {
     technologies?: string[];
     employeeEstimate?: number;
     contactEmail?: string;
+    /**
+     * The page that published that address.
+     *
+     * Needed because "where did you get my email" is a question with a legal
+     * answer, and `${source}:${domain}` is not one. A registry address was
+     * published deliberately by the person who maintains the package, which
+     * is a better paper trail than a crawl — but only if the trail is kept.
+     */
+    contactSource?: string;
   };
 }
 
@@ -88,6 +97,22 @@ export interface ProspectSource {
 const PLATFORM_HOSTS = new Set([
   "github.com", "github.io", "gitlab.com", "bitbucket.org", "sourceforge.net",
   "readthedocs.io", "readthedocs.org", "npmjs.com", "pypi.org", "crates.io",
+  // Code and documentation hosts the package registries actually hand back.
+  // Every one of these arrived as a "company homepage" in a live run: a gem
+  // whose homepage is its own RubyDoc page, a crate pointing at docs.rs, a
+  // Hex package pointing at HexDocs, and several pointing at the registry
+  // they were published to.
+  "sr.ht", "sourcehut.org", "rubydoc.info", "rubyforge.org", "rubygems.org",
+  "npmjs.org", "getcomposer.org", "yarnpkg.com", "jsr.io", "unpkg.com",
+  "hexdocs.pm", "hex.pm", "packagist.org", "metacpan.org", "pkg.go.dev",
+  "godoc.org", "nuget.org", "mvnrepository.com", "maven.org", "clojars.org",
+  "cpan.org", "launchpad.net", "savannah.gnu.org", "gitea.com", "gitee.com",
+  "git.sr.ht", "framagit.org", "salsa.debian.org", "androidfilehost.com",
+  // Project and foundation sites, which are not companies with a budget.
+  "wordpress.org", "gnu.org", "fsf.org", "eclipse.org", "linuxfoundation.org",
+  "cncf.io", "openjsf.org", "python.org", "ruby-lang.org", "rust-lang.org",
+  "php.net", "elixir-lang.org", "erlang.org", "golang.org", "nodejs.org",
+  "rubyonrails.org", "laravel.com", "symfony.com", "jquery.com", "w3.org",
   "medium.com", "substack.com", "wordpress.com", "blogspot.com", "notion.site",
   "netlify.app", "vercel.app", "herokuapp.com", "pages.dev", "web.app",
   "firebaseapp.com", "surge.sh", "glitch.me", "repl.co", "codeberg.org",
