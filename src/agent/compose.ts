@@ -43,6 +43,15 @@ export interface ComposeInput {
   pages?: Array<{ url: string; text: string }>;
   meetingLink?: string;
   previousMessages?: Array<{ subject: string; body: string }>;
+  /**
+   * What this market has actually replied to, from `core/learning.ts`.
+   *
+   * Passed as context rather than as instruction, and only ever containing
+   * findings whose samples do not overlap. A fourteen-send coincidence turned
+   * into a rule becomes the house style, and then every later measurement is
+   * of a market the agent has already narrowed itself to.
+   */
+  whatWorks?: string[];
 }
 
 export interface ComposeResult {
@@ -298,6 +307,15 @@ export function buildBrief(input: ComposeInput, critique: string[] = []): string
     for (const previous of input.previousMessages.slice(-3)) {
       lines.push(`- "${previous.subject}": ${previous.body.split("\n").slice(0, 3).join(" ").slice(0, 220)}`);
     }
+  }
+
+  if (input.whatWorks?.length) {
+    lines.push(
+      "",
+      "## What has actually got replies from this market",
+      "Observed, not tested — it may be the prospects rather than the wording. Use it if it helps and ignore it if it fights the brief above.",
+      ...input.whatWorks.map((line) => `- ${line}`),
+    );
   }
 
   if (critique.length > 0) {

@@ -11,6 +11,7 @@ import { converse } from "./converse";
 import { enrollmentEventFor, stageFor, summarise } from "./deals";
 import { qualify } from "./qualify";
 import { billContactDelivered, billReplyReceived } from "./billing";
+import { reportFor } from "./learning";
 import { warmupVerdict, type SendingHistory, type WarmupVerdict } from "../core/warmup";
 import type { Llm } from "../infra/llm/types";
 import type { Inbox, Transport } from "../infra/transport/types";
@@ -127,6 +128,11 @@ export async function tick(options: TickOptions): Promise<TickSummary> {
   // cap. A new sending domain that emits its full configured volume on day
   // one is a new sending domain with a damaged reputation, and the damage is
   // invisible for weeks.
+  // What this market has replied to, computed once per tick and passed to
+  // every compose. Only findings whose samples separate survive `brief`.
+  const whatWorks = (await reportFor(campaign.id)).briefLines;
+  if (whatWorks.length > 0) say(`Working so far: ${whatWorks.join(" ")}`);
+
   const warmup = await warmupFor(campaign.id, context.compliance.dailySendCap);
   context.compliance = { ...context.compliance, dailySendCap: warmup.dailyCap };
   if (warmup.stage !== "warm") say(`Sending: ${warmup.reason}`);
@@ -139,7 +145,7 @@ export async function tick(options: TickOptions): Promise<TickSummary> {
   try {
     await readReplies({ ...options, now: clock(), campaign, context, inbox, transport, budget, summary, say });
     await fillPipeline({ ...options, now: clock(), campaign, context, budget, summary, say });
-    await sendDue({ ...options, now: clock(), campaign, context, transport, budget, summary, say });
+    await sendDue({ ...options, now: clock(), campaign, context, transport, budget, summary, say, whatWorks });
 
     summary.llm = options.llm.available() ? budgetSummary(options.llm.budget()) : "no LLM configured (deterministic copy)";
 
@@ -248,6 +254,8 @@ export function defaultCompliance(sender: SenderIdentity): ComplianceConfig {
 
 interface PhaseArgs extends TickOptions {
   now: Date;
+  /** Findings from `core/learning.ts` that held up. Usually empty. */
+  whatWorks?: string[];
   campaign: { id: string; userId: string; clientId: string | null; targetLeads: number; minFitScore: number; meetingLink: string | null };
   context: CampaignContext;
   budget: TickBudget;
@@ -655,6 +663,7 @@ async function sendDue(args: PhaseArgs & { transport: Transport }): Promise<void
         sender: context.sender,
         meetingLink: campaign.meetingLink ?? undefined,
         previousMessages: previous,
+        whatWorks: args.whatWorks,
       },
       args.llm,
     );

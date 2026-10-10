@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compose, stageFor, templateDraft, topicOf, withFooter } from "../src/agent/compose";
+import { buildBrief, compose, stageFor, templateDraft, topicOf, withFooter } from "../src/agent/compose";
 import { buildFooter } from "../src/core/compliance";
 import { quoteIsUsed, validateDraft } from "../src/core/draft";
 import { buildCorpus } from "../src/core/provenance";
@@ -168,5 +168,26 @@ describe("compose with no model available", () => {
     expect(result.attempts).toEqual([
       { via: "template", score: result.quality.score, problems: [], failures: result.quality.failures.map((f) => f.label) },
     ]);
+  });
+});
+
+describe("feeding findings back into the copy", () => {
+  it("passes what worked as context, clearly marked as observed", () => {
+    const brief = buildBrief(input({
+      whatWorks: ['The problem they wrote about: "on-call" has replied at 18% across 120 sends.'],
+    }));
+
+    expect(brief).toMatch(/What has actually got replies from this market/);
+    expect(brief).toMatch(/on-call/);
+    // Context, not instruction: a fourteen-send coincidence turned into a
+    // rule becomes the house style, and then every later measurement is of a
+    // market the agent has already narrowed itself to.
+    expect(brief).toMatch(/Observed, not tested/);
+    expect(brief).toMatch(/ignore it if it fights the brief/);
+  });
+
+  it("says nothing at all when nothing has held up yet", () => {
+    expect(buildBrief(input())).not.toMatch(/What has actually got replies/);
+    expect(buildBrief(input({ whatWorks: [] }))).not.toMatch(/What has actually got replies/);
   });
 });

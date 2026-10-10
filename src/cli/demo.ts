@@ -6,6 +6,8 @@ import bcrypt from "bcryptjs";
 import { db, logEvent } from "../infra/db";
 import { DEFAULT_TERMS, formatMoney, renderInvoice } from "../core/billing";
 import { closeDeal, confirmMeeting, invoiceFor } from "../agent/billing";
+import { headline, reportFor } from "../agent/learning";
+import { rate } from "../core/learning";
 import { ingest } from "../agent/ingest";
 import { pipelineSummary, tick } from "../agent/orchestrator";
 import { fromJson, toJson } from "../lib/json";
@@ -199,9 +201,55 @@ run(async () => {
   heading("5. What it earned");
   await settleAndBill(campaign.id, client.id, client.webhookSecret!);
 
-  // --- 6. what actually happened ------------------------------------------
+  // --- 6. what the run taught it ------------------------------------------
+  heading("6. What it learned");
+  await showLearning(campaign.id);
+
+  // --- 7. what actually happened ------------------------------------------
   await report(campaign.id, rounds);
 });
+
+/**
+ * What the run taught it, which on nine prospects is almost nothing.
+ *
+ * Printed anyway, and that is the point: the honest output of a learning
+ * layer at this volume is "not enough to say", and an operator should see
+ * what that looks like before they see a confident number. Every analytics
+ * screen in this category shows a ranked list of percentages from samples
+ * this size and lets the reader assume the order means something.
+ */
+async function showLearning(campaignId: string): Promise<void> {
+  const { reports, briefLines } = await reportFor(campaignId);
+  const numbers = await headline(campaignId);
+
+  console.log(`  ${numbers.contacted} prospect(s) contacted, ${numbers.replied} replied, ${numbers.positive} usefully.`);
+  // Said plainly, because a demo reporting a 100% reply rate without
+  // explaining why is the kind of number that makes people distrust
+  // everything else on the page.
+  console.log(colour.dim(`  Reply rate ${rate(numbers.replyRate)}, which means nothing: the fixture buyers are scripted to answer.`));
+  console.log(colour.dim(`  Real cold email at 4%+ is doing well.`));
+  console.log();
+
+  for (const report of reports.slice(0, 3)) {
+    console.log(`  ${colour.bold(report.label)}`);
+    if (report.tooEarly) {
+      console.log(`    ${colour.dim(report.tooEarly)}`);
+      continue;
+    }
+    for (const finding of report.findings) {
+      const rateText = finding.verdict === "too_early"
+        ? colour.dim("not enough to say")
+        : `${rate(finding.replyRate)} (at worst ${rate(finding.lowerBound)})`;
+      console.log(`    ${finding.value.padEnd(24)} ${String(finding.sent).padStart(3)} sent  ${rateText}`);
+    }
+    if (report.recommendation) console.log(`    ${colour.dim(report.recommendation)}`);
+  }
+
+  console.log();
+  console.log(briefLines.length > 0
+    ? `  Fed back into the copy: ${briefLines.join(" ")}`
+    : colour.dim(`  Nothing held up well enough to feed back into the copy, which is the right answer on ${numbers.contacted} prospects.`));
+}
 
 /**
  * Confirms a meeting, takes a payment, and prints the invoice.
@@ -337,7 +385,7 @@ async function report(campaignId: string, rounds: Array<Awaited<ReturnType<typeo
     pipelineSummary(campaignId),
   ]);
 
-  heading("6. Leads");
+  heading("7. Leads");
   for (const lead of leads) {
     const verdict = lead.status === "enrolled"
       ? colour.green("enrolled")
@@ -346,7 +394,7 @@ async function report(campaignId: string, rounds: Array<Awaited<ReturnType<typeo
     if (lead.rejectedReason) console.log(colour.dim(`    ${lead.rejectedReason}`));
   }
 
-  heading("7. What it wrote");
+  heading("8. What it wrote");
   const sent = messages.filter((m) => m.direction === "outbound" && m.status === "sent");
   const first = sent.find((m) => m.stepIndex === 0);
   if (first) {
@@ -355,7 +403,7 @@ async function report(campaignId: string, rounds: Array<Awaited<ReturnType<typeo
     for (const line of first.body.split("\n")) console.log(`  ${colour.cyan("│")} ${line}`);
   }
 
-  heading("8. Totals");
+  heading("9. Totals");
   const totals = rounds.reduce(
     (sum, round) => ({
       discovered: sum.discovered + round.discovered,
@@ -382,7 +430,7 @@ async function report(campaignId: string, rounds: Array<Awaited<ReturnType<typeo
   console.log(`  suppressed   ${suppressions.length}`);
   console.log(`\n  Pipeline: ${Object.entries(pipeline.byStage).filter(([, n]) => n > 0).map(([s, n]) => `${s} ${n}`).join(", ")}`);
 
-  heading("9. Did the gates actually fire?");
+  heading("10. Did the gates actually fire?");
   const checks: Array<{ label: string; pass: boolean; detail: string }> = [];
   const byDomain = new Map(leads.map((l) => [l.domain, l]));
 

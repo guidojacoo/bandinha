@@ -49,6 +49,7 @@ So the design rule is *structurally incapable*, not *instructed not to*:
 | Copy nobody would read | Eleven measured checks. A draft below the bar is rewritten against the checks it failed, best-of-N, and the template competes on the same score. | `src/core/quality.ts` |
 | Billing a client for nothing | A unit is chargeable only when the evidence for it is in the database. A meeting needs a person; a win needs a payment. | `src/core/billing.ts` |
 | A burned sending domain | The daily cap ramps over four weeks and throttles itself on bounces and complaints. | `src/core/warmup.ts` |
+| Measuring copy but never learning | Replies are attributed back to signal, source, step and quality band — with the honesty to say when a sample is too small to mean anything. | `src/core/learning.ts` |
 | Paid data vendors | Ten free discovery sources, routed by what the ICP actually is. | `src/infra/sources/` |
 
 ---
@@ -242,6 +243,41 @@ A note on the ask. It asks about their situation, not their calendar:
 "Do you have fifteen minutes" wants a commitment before they know whether they
 care. The question above costs them one line, and the meeting becomes obvious
 in the conversation it starts.
+
+### And it learns which of it worked
+
+`/learning` attributes real replies back to the attributes of the messages
+that earned them — which pain signal the prospect wrote about, which registry
+the lead came from, which touch in the sequence, which quality band, named
+person or shared inbox. The two that matter most are the first two, because
+they change *who* gets contacted, and that matters more than how.
+
+Three decisions make it an instrument rather than a dashboard:
+
+**It ranks by the lower bound, not the rate.** One reply from one send is a
+100% reply rate and tells you nothing; forty from two hundred is 20% and tells
+you a lot. A Wilson lower bound asks "given this sample, what is the worst the
+true rate plausibly is" — and unusable samples are sorted out of the ranking
+entirely, because the interval alone does not fix it: at n = 1 with one reply
+the lower bound is 21%, *above* a solid 15%.
+
+**It refuses to answer when it cannot.** Below twelve sends a value gets its
+counts and no rate at all, and a comparison whose intervals overlap says
+"these cannot be told apart yet" instead of picking a winner. Most comparisons
+at these volumes are exactly that.
+
+**It says it is observational.** A real A/B test needs hundreds of sends per
+arm and the volume caps deliberately prevent that, so this measures messages
+that were sent anyway: it finds correlation and cannot establish cause. In
+practice that is usually enough to act on — if prospects who wrote about
+on-call pain reply and prospects who merely mention Kubernetes do not, change
+the ICP whether or not the mechanism is proven — but a finding is a reason to
+look, not a result.
+
+Findings that hold up are passed back into the composing prompt as context,
+never as instruction. A fourteen-send coincidence turned into a rule becomes
+the house style, and then every later measurement is of a market the agent has
+already narrowed itself to.
 
 ---
 
@@ -497,6 +533,7 @@ src/core/        pure: no network, no database, no clock except one passed in
   icp.ts           who buys this, and which free sources can find them
   budget.ts        how much of today's free tier is left, per task
   quality.ts       is this copy worth reading? eleven measured checks
+  learning.ts      what actually got replies, and when you cannot tell
   warmup.ts        how much may go out today without burning the domain
   billing.ts       what may be charged for, and the evidence each unit needs
 
@@ -518,13 +555,14 @@ src/agent/       the pipeline
   converse.ts      answering a reply, and knowing when not to
   deals.ts         stages derived from what happened, terminal stages absorb
   billing.ts       raising charges from facts, and the only path to `won`
+  learning.ts      attributing replies back to what produced them
   orchestrator.ts  one tick: replies, discover, qualify, enrol, send
 
 src/app/         the operator console (Next.js)
 src/cli/         setup, sell, agent, demo, doctor, discover
 deploy/          cron, systemd and GitHub Actions recipes, all free
 fixtures/        ten sites, five scripted buyers, and a server that speaks Groq
-test/            607 tests
+test/            644 tests
 ```
 
 The split is the point. Everything that has to be *right* — who may be
@@ -562,7 +600,7 @@ marked as such everywhere they appear. The pure core, the npm, directory and
 seed sources, the crawler, the extractor, the full agent pipeline, the model
 client against Groq's protocol, the quality scorer, the billing layer, the
 payment webhook, the dry-run transport and the console are all proven end to
-end by `npm run demo`, `npm run discover` and 607 tests.
+end by `npm run demo`, `npm run discover` and 644 tests.
 
 And one thing worth saying plainly about the copy: it is measured, and
 measuring is not the same as selling. The scorer encodes what is known to
