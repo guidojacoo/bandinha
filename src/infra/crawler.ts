@@ -27,6 +27,15 @@ export interface CrawlResult {
   pages: PageText[];
   /** Raw HTML of the first page, for structured-markup extraction. */
   homeHtml: string;
+  /**
+   * Raw HTML per page, capped per page and held only for this run.
+   *
+   * Needed because `mailto:` links do not survive the text extraction, and
+   * /contact and /team are exactly where a company publishes the people
+   * worth writing to. Dropped before anything is persisted — the parsed
+   * `pages` are what the database stores.
+   */
+  html: Map<string, string>;
   errors: Array<{ url: string; error: string }>;
   /** True when the entry URL itself could not be read. */
   failed: boolean;
@@ -97,12 +106,13 @@ export async function crawlSite(entry: string, options: CrawlOptions = {}): Prom
 
   const parsedEntry = normaliseEntryUrl(entry);
   if (!parsedEntry.ok) {
-    return { domain: "", origin: "", pages: [], homeHtml: "", errors: [{ url: entry, error: parsedEntry.error }], failed: true };
+    return { domain: "", origin: "", pages: [], homeHtml: "", html: new Map(), errors: [{ url: entry, error: parsedEntry.error }], failed: true };
   }
 
   const { origin, domain } = parsedEntry;
   const pages: PageText[] = [];
   const errors: CrawlResult["errors"] = [];
+  const html = new Map<string, string>();
   const seen = new Set<string>();
   let homeHtml = "";
 
@@ -123,9 +133,10 @@ export async function crawlSite(entry: string, options: CrawlOptions = {}): Prom
       // An unreadable entry page means there is nothing to sell from.
       if (next.depth === 0) {
         const retried = await retryWithoutWww(next.url, options.timeoutMs);
-        if (!retried) return { domain, origin, pages, homeHtml, errors, failed: true };
+        if (!retried) return { domain, origin, pages, homeHtml, html, errors, failed: true };
         pages.push(parsePage(retried.body, retried.finalUrl));
         homeHtml = retried.body;
+        html.set(retried.finalUrl, retried.body.slice(0, MAX_RETAINED_HTML));
         continue;
       }
       continue;
@@ -136,6 +147,7 @@ export async function crawlSite(entry: string, options: CrawlOptions = {}): Prom
 
     const page = parsePage(result.body, result.finalUrl);
     if (next.depth === 0) homeHtml = result.body;
+    html.set(result.finalUrl, result.body.slice(0, MAX_RETAINED_HTML));
     pages.push(page);
     options.onPage?.(page, pages.length - 1);
 
@@ -158,7 +170,7 @@ export async function crawlSite(entry: string, options: CrawlOptions = {}): Prom
     }
   }
 
-  return { domain, origin, pages, homeHtml, errors, failed: pages.length === 0 };
+  return { domain, origin, pages, homeHtml, html, errors, failed: pages.length === 0 };
 }
 
 /**
@@ -180,6 +192,9 @@ async function retryWithoutWww(url: string, timeoutMs?: number) {
     return null;
   }
 }
+
+/** Per page, to bound memory on a marketing site full of inlined assets. */
+const MAX_RETAINED_HTML = Number(process.env.CRAWL_MAX_RETAINED_HTML ?? 400_000);
 
 /** Trailing slashes and index files are the same page. */
 function canonical(url: string): string {

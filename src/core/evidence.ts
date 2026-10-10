@@ -25,7 +25,13 @@ export const MAX_QUOTE_CHARS = 240;
 const BOILERPLATE = [
   /^(home|about|contact|products?|services?|pricing|blog|careers?)\b/i,
   /\ball rights reserved\b/i,
-  /\bcookie(s)? (policy|notice|settings)\b/i,
+  /\bcookie(s)? (policy|notice|settings|consent|preferences)\b/i,
+  // Consent banners are phrased a hundred ways and none of them are evidence.
+  // Matching only "cookie policy" let "This site uses cookies to improve your
+  // experience" through, and it was offered to a prospect as a value prop.
+  /\b(?:use|uses|using|used)\s+cookies\b/i,
+  /\bthis (?:site|website) (?:uses|stores|collects)\b/i,
+  /\b(?:accept|manage|reject)\s+(?:all\s+)?cookies\b/i,
   /\bprivacy policy\b/i,
   /\bterms (of|and) (service|use|conditions)\b/i,
   /\bsign (up|in)\b.*\bnewsletter\b/i,

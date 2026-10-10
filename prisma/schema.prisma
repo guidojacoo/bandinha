@@ -300,16 +300,25 @@ model AgentRun {
 /// larger models). The agent tracks spend so it can ration the budget across
 /// a day's work and fall back to deterministic templates when it runs out,
 /// rather than failing halfway through a campaign.
+///
+/// Two kinds of row share this table. `model = "*"` is the authoritative
+/// budget for the day, and carries the per-task split that stops extraction
+/// starving replies. One row per real model name is kept alongside it, purely
+/// so the console can show where the day went.
 model TokenLedger {
   id    String @id @default(cuid())
   /// UTC date, YYYY-MM-DD.
   day   String
+  /// A model name, or "*" for the day's authoritative budget row.
   model String
 
   requests     Int @default(0)
   inputTokens  Int @default(0)
   outputTokens Int @default(0)
   failures     Int @default(0)
+
+  /// JSON: Partial<Record<TaskKind, number>>, on the "*" row only.
+  byTask String?
 
   updatedAt DateTime @updatedAt
 
