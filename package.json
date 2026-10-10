@@ -23,7 +23,8 @@
     "fixtures": "tsx fixtures/server.ts",
     "fixtures:hosts": "bash fixtures/hosts.sh",
     "buyers": "tsx fixtures/buyers.ts",
-    "discover": "tsx src/cli/discover.ts"
+    "discover": "tsx src/cli/discover.ts",
+    "mock:groq": "tsx fixtures/groq-cli.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",

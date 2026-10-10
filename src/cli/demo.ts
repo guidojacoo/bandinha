@@ -177,16 +177,32 @@ run(async () => {
 });
 
 /**
- * The next weekday at 10:00 UTC, which is inside the default send window.
+ * A business hour guaranteed to be *after* anything enrolled during this run.
  *
- * Today when today is a weekday, so the demo stays close to real time.
+ * Subtler than it looks, and it cost a confusing run to work out. Enrollments
+ * are written at the real wall clock, and the cadence schedules a zero-day
+ * first touch with `addBusinessDays`, which rolls off a weekend while keeping
+ * the time of day. So an enrollment created on a Saturday at 17:29 is first
+ * due on Monday at 17:29 — and a clock pinned to "the next weekday at 10:00"
+ * is Monday at 10:00, which is *earlier*. Nothing is due, nothing sends, and
+ * the demo looks broken for reasons that have nothing to do with the agent.
+ *
+ * Pinning a full business day past that point is correct whatever time of day
+ * the demo is run at.
  */
 function businessHour(): Date {
   const date = new Date();
-  date.setUTCHours(10, 0, 0, 0);
+  // Roll off a weekend first, then one clear business day forward.
+  const nextBusinessDay = () => {
+    do {
+      date.setUTCDate(date.getUTCDate() + 1);
+    } while (date.getUTCDay() === 0 || date.getUTCDay() === 6);
+  };
   while (date.getUTCDay() === 0 || date.getUTCDay() === 6) {
     date.setUTCDate(date.getUTCDate() + 1);
   }
+  nextBusinessDay();
+  date.setUTCHours(10, 0, 0, 0);
   return date;
 }
 

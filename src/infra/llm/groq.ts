@@ -22,18 +22,32 @@ import type { BudgetStore, Llm, LlmRequest, LlmResult, LlmUsage } from "./types"
  *    gets slower and blunter, never broken.
  */
 
-const ENDPOINT = process.env.GROQ_BASE_URL ?? "https://api.groq.com/openai/v1";
+export const DEFAULT_ENDPOINT = "https://api.groq.com/openai/v1";
 
 /**
  * Model tiers.
  *
  * `large` writes and reasons; `small` classifies and extracts. Both are
- * free-tier models on Groq. Overridable by environment variable because
- * free-tier model names change faster than this file will.
+ * free-tier models on Groq. Read at call time rather than at module load,
+ * because module-scope `process.env` reads cannot be changed afterwards —
+ * which made the endpoint impossible to point anywhere else, and the whole
+ * client impossible to exercise against anything.
+ *
+ * That also makes the alternative providers work: any OpenAI-compatible
+ * endpoint will do, including a local llama.cpp or vLLM, which is the other
+ * way to keep inference free.
  */
+export function models(): { large: string; small: string } {
+  return {
+    large: process.env.GROQ_MODEL_LARGE ?? "llama-3.3-70b-versatile",
+    small: process.env.GROQ_MODEL_SMALL ?? "llama-3.1-8b-instant",
+  };
+}
+
+/** Kept as a getter pair so existing call sites read the live value. */
 export const MODELS = {
-  large: process.env.GROQ_MODEL_LARGE ?? "llama-3.3-70b-versatile",
-  small: process.env.GROQ_MODEL_SMALL ?? "llama-3.1-8b-instant",
+  get large() { return models().large; },
+  get small() { return models().small; },
 };
 
 const MAX_ATTEMPTS = Number(process.env.GROQ_MAX_ATTEMPTS ?? 3);
@@ -65,6 +79,8 @@ export class MemoryBudgetStore implements BudgetStore {
 
 export interface GroqOptions {
   apiKey?: string;
+  /** Any OpenAI-compatible base URL. Defaults to GROQ_BASE_URL, then Groq. */
+  baseUrl?: string;
   store?: BudgetStore;
   /** Called after every attempt, for the run log. */
   onCall?: (info: { model: string; task: TaskKind; usage?: LlmUsage; status: number; error?: string }) => void;
@@ -73,6 +89,7 @@ export interface GroqOptions {
 export class GroqClient implements Llm {
   readonly name = "groq";
   private readonly apiKey: string;
+  private readonly baseUrl: string;
   private readonly store: BudgetStore;
   private readonly onCall: GroqOptions["onCall"];
   private state: BudgetState | null = null;
@@ -81,6 +98,7 @@ export class GroqClient implements Llm {
 
   constructor(options: GroqOptions = {}) {
     this.apiKey = (options.apiKey ?? process.env.GROQ_API_KEY ?? "").trim();
+    this.baseUrl = (options.baseUrl ?? process.env.GROQ_BASE_URL ?? DEFAULT_ENDPOINT).replace(/\/$/, "");
     this.store = options.store ?? new MemoryBudgetStore();
     this.onCall = options.onCall;
   }
@@ -111,12 +129,13 @@ export class GroqClient implements Llm {
       await sleep(wait);
     }
 
-    const model = request.tier === "small" ? MODELS.small : MODELS.large;
+    const tiers = models();
+    const model = request.tier === "small" ? tiers.small : tiers.large;
     const maxTokens = Math.min(request.maxTokens ?? decision.maxTokens, decision.maxTokens);
 
     let lastError = "";
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const response = await fetchText(`${ENDPOINT}/chat/completions`, {
+      const response = await fetchText(`${this.baseUrl}/chat/completions`, {
         method: "POST",
         immediate: true,
         timeoutMs: Number(process.env.GROQ_TIMEOUT_MS ?? 45_000),
