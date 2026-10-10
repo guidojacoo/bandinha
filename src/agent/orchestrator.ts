@@ -308,6 +308,8 @@ async function readReplies(args: PhaseArgs & { inbox: Inbox; transport: Transpor
               toEmail: contact.email, fromEmail: context.sender.fromEmail,
               subject: `Re: ${message.subject}`.slice(0, 200), body: action.message.body,
               composedVia: action.via, provenance: toJson(action.message.provenance),
+              qualityScore: action.quality.score,
+              qualityChecks: toJson(action.quality.checks),
               blockedCode: "no_evidence", blockedReason: action.validation.problems.join("; "),
             },
           });
@@ -322,6 +324,7 @@ async function readReplies(args: PhaseArgs & { inbox: Inbox; transport: Transpor
           body: action.message.body,
           provenance: action.message.provenance,
           composedVia: action.via,
+          quality: action.quality,
           isReply: true,
           inReplyTo: message.messageId,
         });
@@ -599,6 +602,9 @@ async function sendDue(args: PhaseArgs & { transport: Transport }): Promise<void
           subject: drafted.message.subject, body: drafted.message.body,
           stepIndex: step.index, stepIntent: step.intent, composedVia: drafted.via,
           provenance: toJson(drafted.message.provenance),
+          qualityScore: drafted.quality.score,
+          qualityChecks: toJson(drafted.quality.checks),
+          attempts: toJson(drafted.attempts),
           blockedCode: "no_evidence", blockedReason: drafted.validation.problems.join("; ").slice(0, 1_000),
         },
       });
@@ -616,6 +622,8 @@ async function sendDue(args: PhaseArgs & { transport: Transport }): Promise<void
       body: drafted.message.body,
       provenance: drafted.message.provenance,
       composedVia: drafted.via,
+      quality: drafted.quality,
+      attempts: drafted.attempts,
       stepIndex: step.index,
       stepIntent: step.intent,
     });
@@ -626,7 +634,7 @@ async function sendDue(args: PhaseArgs & { transport: Transport }): Promise<void
       const next = advance(snapshot, { type: "sent", at: now }, sequence);
       await saveEnrollment(enrollment.id, next, sequence, enrollment.enrolledAt);
       await updateDeal(campaign.id, enrollment.leadId, undefined);
-      say(`  ${enrollment.contact.email}: step ${step.index + 1}/${sequence.steps.length} (${step.intent}, ${drafted.via}) — "${drafted.message.subject}"`);
+      say(`  ${enrollment.contact.email}: step ${step.index + 1}/${sequence.steps.length} (${step.intent}, ${drafted.via}, copy ${drafted.quality.score}/100) — "${drafted.message.subject}"`);
     }
   }
 }
@@ -647,6 +655,8 @@ async function deliver(args: PhaseArgs & {
   body: string;
   provenance: unknown;
   composedVia: string;
+  quality?: { score: number; checks: unknown };
+  attempts?: unknown;
   stepIndex?: number;
   stepIntent?: string;
   isReply?: boolean;
@@ -691,6 +701,9 @@ async function deliver(args: PhaseArgs & {
     subject: args.subject, body: args.body,
     stepIndex: args.stepIndex, stepIntent: args.stepIntent,
     composedVia: args.composedVia, provenance: toJson(args.provenance),
+    qualityScore: args.quality?.score,
+    qualityChecks: args.quality ? toJson(args.quality.checks) : undefined,
+    attempts: args.attempts === undefined ? undefined : toJson(args.attempts),
   };
 
   if (!decision.allowed) {

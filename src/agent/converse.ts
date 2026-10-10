@@ -1,6 +1,7 @@
 import { classifyReply, needsHuman } from "../core/classify";
 import { buildCorpus } from "../core/provenance";
 import { validateDraft } from "../core/draft";
+import { scoreQuality, type QualityReport } from "../core/quality";
 import { buildFooter } from "../core/compliance";
 import { withFooter } from "./compose";
 import type {
@@ -34,7 +35,7 @@ import type { Llm } from "../infra/llm/types";
 export type ConverseAction =
   | { kind: "suppress"; reason: "unsubscribed" | "hard_bounce" | "not_interested"; analysis: ReplyAnalysis }
   | { kind: "escalate"; why: string; analysis: ReplyAnalysis }
-  | { kind: "reply"; message: DraftMessage; validation: DraftValidation; via: "llm" | "template"; analysis: ReplyAnalysis }
+  | { kind: "reply"; message: DraftMessage; validation: DraftValidation; quality: QualityReport; via: "llm" | "template"; analysis: ReplyAnalysis }
   | { kind: "wait"; why: string; analysis: ReplyAnalysis };
 
 export interface ConverseInput {
@@ -129,7 +130,7 @@ async function draftReply(
   input: ConverseInput,
   analysis: ReplyAnalysis,
   llm: Llm,
-): Promise<{ kind: "reply"; message: DraftMessage; validation: DraftValidation; via: "llm" | "template" }> {
+): Promise<{ kind: "reply"; message: DraftMessage; validation: DraftValidation; quality: QualityReport; via: "llm" | "template" }> {
   const corpus = buildCorpus(input.offering, input.profile, input.pages ?? []);
   const context = {
     sender: input.sender,
@@ -164,15 +165,32 @@ async function draftReply(
         input.sender,
       );
       const validation = validateDraft(message, context);
-      // One attempt only. A reply that fails validation is answered from the
-      // template rather than retried: the prospect is waiting, and a second
-      // round trip against a rate-limited free tier can take a minute.
-      if (validation.ok) return { kind: "reply", message, validation, via: "llm" };
+      const quality = judge(message, input);
+      // One attempt only, and it has to beat the template on both bars. A
+      // reply that fails is answered deterministically rather than retried:
+      // the prospect is waiting, and a second round trip against a
+      // rate-limited free tier can take a minute.
+      if (validation.ok && quality.ok) return { kind: "reply", message, validation, quality, via: "llm" };
     }
   }
 
   const message = withFooter(templateReply(input, analysis), input.sender);
-  return { kind: "reply", message, validation: validateDraft(message, context), via: "template" };
+  return {
+    kind: "reply", message, via: "template",
+    validation: validateDraft(message, context),
+    quality: judge(message, input),
+  };
+}
+
+function judge(message: DraftMessage, input: ConverseInput): QualityReport {
+  const at = message.body.indexOf(input.sender.postalAddress.trim());
+  return scoreQuality({
+    subject: message.subject,
+    copy: (at > 0 ? message.body.slice(0, at) : message.body).trim(),
+    evidence: input.profile.evidence,
+    knownNames: [input.offering.companyName, input.profile.companyName, input.contactName ?? ""].filter(Boolean),
+    stage: "reply",
+  });
 }
 
 export function buildReplyBrief(input: ConverseInput, analysis: ReplyAnalysis): string {

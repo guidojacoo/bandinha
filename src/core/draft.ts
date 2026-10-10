@@ -88,6 +88,16 @@ export interface DraftContext {
   allowedNames: string[];
   /** True when the draft answers something the prospect sent us. */
   isReply?: boolean;
+  /**
+   * True for the first message in a thread.
+   *
+   * The specificity requirement below applies here and nowhere else. The
+   * quote is what earns the right to write at all, and it earns it once: a
+   * second touch that re-reads the prospect's own sentence back to them is
+   * the agent forgetting it has already spoken to this person. The evidence
+   * gate still blocks the lead outright if there was never a quote.
+   */
+  isFirstTouch?: boolean;
   /** Off only when the operator has explicitly disabled the evidence gate. */
   requireEvidenceUse?: boolean;
 }
@@ -163,7 +173,7 @@ export function validateDraft(draft: DraftMessage, ctx: DraftContext): DraftVali
   }
 
   // --- 4. Specificity ----------------------------------------------------
-  if (ctx.requireEvidenceUse !== false && !ctx.isReply) {
+  if (ctx.requireEvidenceUse !== false && !ctx.isReply && ctx.isFirstTouch !== false) {
     const used = ctx.evidence.some((e) => quoteIsUsed(e.quote, copy));
     const citesProspect = draft.provenance.some((r) => r.kind === "prospect" && r.verified);
     if (!used && !citesProspect)
@@ -206,8 +216,15 @@ export function quoteIsUsed(quote: string, body: string): boolean {
   if (q.length === 0) return false;
   const b = new Set(words(body));
   const shared = new Set(q.filter((w) => b.has(w)));
-  // Two distinctive shared words, or a third of the quote's content words.
-  return shared.size >= 2 || shared.size / new Set(q).size >= 0.34;
+  if (shared.size === 0) return false;
+
+  // Two shared words is not enough on its own: a form letter about "most
+  // teams and alert noise" shared exactly "most" and "noise" with a quote
+  // about being paged forty times a week, and was scored as having used it.
+  // At least one shared word has to be distinctive.
+  const hasDistinctive = [...shared].some((w) => w.length >= 6);
+  if (shared.size >= 2 && hasDistinctive) return true;
+  return shared.size / new Set(q).size >= 0.34;
 }
 
 /** Capitalised multi-word names in the copy that nothing crawled mentions. */

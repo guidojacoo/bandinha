@@ -193,6 +193,15 @@ model Message {
   /// "llm" | "llm-repaired" | "template" — how the copy was produced.
   composedVia String?
 
+  /// The agent's own measured opinion of this copy, 0-100, from
+  /// core/quality.ts. Stored so the console can show it and so a drop in
+  /// copy quality is visible before the reply rate shows it.
+  qualityScore Int?
+  /// JSON: QualityCheck[] — the named checks behind that score.
+  qualityChecks String?
+  /// JSON: the composing attempts, for "why does it read like this?"
+  attempts String?
+
   /// JSON: ProvenanceRecord[] — every factual claim with its source URL.
   /// A message cannot be sent unless each claim resolves to a crawled page.
   provenance String?
