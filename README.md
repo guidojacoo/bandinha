@@ -577,7 +577,7 @@ against the protocol server, and `payments` exercises the only route that can
 record money, against a throwaway database rather than yours.
 
 ```bash
-npm test         # 607 tests, ~17s
+npm test         # 644 tests, ~16s
 npm run typecheck
 ```
 
