@@ -272,7 +272,13 @@ export const prospects: FixtureSite[] = [
     technologies: "Kubernetes, Kafka and Go",
     contacts: [{ email: "p.almeida@meridianpay.test", name: "Paulo Almeida", title: "VP Engineering" }],
     expect: "enrol",
-    because: "Describes exactly the decision Northwind automates, in different words from every other fixture.",
+    // Worth keeping as a known miss rather than rewording to suit the code.
+    // It phrases the problem as "bad enough to wake somebody up" while the
+    // seller's site says "stop being woken" — the same problem in vocabulary
+    // the deterministic signal derivation cannot bridge. An LLM-derived ICP
+    // generalises across that gap; the no-key path does not, and pretending
+    // otherwise would mean editing the fixture until the code looked good.
+    because: "Describes the decision Northwind automates in vocabulary the seller never uses. Enrolled with an LLM-derived ICP; missed by the deterministic one.",
   }),
 
   prospect({

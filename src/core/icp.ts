@@ -41,11 +41,12 @@ const GRAMMATICAL = new Set([
 function words(text: string): string[] {
   return text
     .toLowerCase()
-    // Dots are kept so "node.js" survives, then trimmed from the edges so a
-    // sentence-final token does not become the phrase "actually breaking.".
-    .replace(/[^a-z0-9+#. ]+/g, " ")
+    // Dots and hyphens are kept so "node.js" and "on-call" survive as single
+    // tokens, then trimmed from the edges so a sentence-final token does not
+    // become the phrase "actually breaking.".
+    .replace(/[^a-z0-9+#.\- ]+/g, " ")
     .split(/\s+/)
-    .map((w) => w.replace(/^\.+|\.+$/g, ""))
+    .map((w) => w.replace(/^[.\-]+|[.\-]+$/g, ""))
     .filter(Boolean);
 }
 
@@ -435,11 +436,12 @@ export function inferIcp(offering: Offering, corpusText = ""): Icp {
   // status quo, which is often the prospect's phrasing too.
   const painSignals = uniqueLower([
     ...signalsFromCapabilities(offering),
-    ...[...offering.valueProps.map((v) => v.text), offering.oneLiner, corpusText].flatMap(problemPhrases),
+    ...signalsFromProse(corpusText, offering),
+    ...[...offering.valueProps.map((v) => v.text), offering.oneLiner].flatMap(problemPhrases),
   ])
     .filter(isPlausibleSignal)
     .filter((signal) => !isSellerBrandWord(signal, offering))
-    .slice(0, 18);
+    .slice(0, 24);
 
   const positiveSignals = uniqueLower([
     ...technologyTerms(offering),
@@ -463,6 +465,73 @@ export function inferIcp(offering: Offering, corpusText = ""): Icp {
   };
 
   return { ...base, ...routeSources(offering, base) };
+}
+
+/**
+ * Cues that mark a sentence as being about the problem.
+ *
+ * Two kinds. The first is the seller naming the status quo it replaces —
+ * manual work, noise, things done by hand. The second is the seller naming
+ * what its product watches, which is the same subject from the other side.
+ * A sentence with neither is prose about the company, not the problem.
+ */
+const PROBLEM_SENTENCE_CUES =
+  /\b(?:stop|stops|avoid|avoids|prevent|prevents|without|instead of|no reliable|by hand|manually|manual|spreadsheet|noise|wasted|woken|paged|pager|burning|breach|breached|miss|missed|fail|failing|broken|slow|outdated|struggle|struggling|painful|annoying|tedious|watches|watch|tracks|track|monitors|monitor|detects|detect|calculates|calculate|tells you|alerts you|warns|replaces|replace)\b/i;
+
+/**
+ * Noun phrases the seller uses when talking about the problem.
+ *
+ * This is the half of signal derivation that capabilities cannot provide. A
+ * feature heading says "Burn rate alerts"; the prose around it says "your
+ * on-call engineers stop being woken by alerts that nobody acts on" — and
+ * "on-call engineers" is the phrase a prospect with the problem writes on
+ * their own careers page.
+ *
+ * Restricted to problem-cue sentences on purpose. Ranking nouns by frequency
+ * across the whole site is the heuristic that once scraped the seller's own
+ * postal address into the ICP; requiring a cue means the phrases come from
+ * where the seller discusses the problem, not from its address block.
+ */
+function signalsFromProse(corpusText: string, offering: Offering): string[] {
+  if (!corpusText) return [];
+
+  const counts = new Map<string, number>();
+  const brand = new Set(words(offering.companyName));
+
+  for (const sentence of corpusText.split(/(?<=[.!?])\s+|\n+/)) {
+    if (sentence.length < 30 || sentence.length > 320) continue;
+    if (!PROBLEM_SENTENCE_CUES.test(sentence)) continue;
+
+    const tokens = words(sentence);
+    let run: string[] = [];
+    const flush = () => {
+      for (let size = Math.min(3, run.length); size >= 2; size--) {
+        for (let i = 0; i + size <= run.length; i++) {
+          const phrase = run.slice(i, i + size).join(" ");
+          counts.set(phrase, (counts.get(phrase) ?? 0) + 1);
+        }
+      }
+      run = [];
+    };
+
+    // Only grammar and the seller's own name break a run. An earlier version
+    // also broke on generic and buyer nouns, which destroyed the two best
+    // phrases on the page: "service level objectives" became "level
+    // objectives" (broken at "service") and "on-call engineers" vanished
+    // entirely (broken at "engineers"). Those words are weak alone and
+    // perfectly good inside a phrase.
+    for (const token of tokens) {
+      if (token.length >= 4 && !GRAMMATICAL.has(token) && !brand.has(token)) run.push(token);
+      else flush();
+    }
+    flush();
+  }
+
+  return [...counts.entries()]
+    .filter(([phrase]) => phrase.split(" ").some((w) => !isWeakWord(w)))
+    .sort((a, b) => b[1] - a[1] || b[0].length - a[0].length)
+    .slice(0, 14)
+    .map(([phrase]) => phrase);
 }
 
 /**
@@ -551,6 +620,11 @@ export function normaliseIcp(partial: Partial<Icp>, offering: Offering): Icp {
     preferredSources: uniqueLower([...requested, ...routed.preferredSources]),
     sourceHints: { ...routed.sourceHints, ...(partial.sourceHints ?? {}) },
   };
+}
+
+/** True when a word carries no meaning on its own. */
+function isWeakWord(word: string): boolean {
+  return WEAK_SINGLE_WORDS.has(word) || GENERIC_HEADS.has(word) || BUYER_NOUNS.has(word);
 }
 
 /** The seller's own name is not a signal that a prospect has a problem. */

@@ -39,6 +39,18 @@ const BOILERPLATE = [
   /^\s*(copyright|©)/i,
   /\bfollow us\b/i,
   /\bskip to (main )?content\b/i,
+  // Recruiting copy addressed to a candidate. A careers page is one of the
+  // best sources of evidence — a job ad is the most candid document a company
+  // publishes about its own problems — but only where the company is speaking
+  // about itself. "You would work on Kubernetes, Kafka and Go" became the
+  // opening line of a cold email, addressed to the person who runs the team
+  // rather than to the applicant it was written for.
+  /\byou(?:'ll| will| would| can expect| should)\b/i,
+  /\bwe(?:'re| are) (?:looking for|hiring|seeking)\b/i,
+  /\b(?:the )?ideal candidate\b/i,
+  /\byour (?:role|responsibilities|day|application|cv|r[eé]sum[eé])\b/i,
+  /\bapply (?:now|today|here|online)\b/i,
+  /\b(?:what|who) (?:we|you)(?:'re| are) (?:looking for|offer)\b/i,
 ];
 
 /**

@@ -115,3 +115,20 @@ describe("looksLikeNavigation, via isUsableQuote", () => {
     expect(isUsableQuote("Engineering | Observability | Reliability | Incident Response and Alerting")).toBe(false);
   });
 });
+
+describe("recruiting copy is not evidence", () => {
+  it.each([
+    "You would work on Kubernetes, Kafka and Go alongside a small platform team.",
+    "We are looking for a site reliability engineer to own our alerting pipeline.",
+    "The ideal candidate has run production Kubernetes at scale for several years.",
+    "Your responsibilities will include owning the on-call rotation and its tooling.",
+  ])("rejects %s", (text) => {
+    expect(isUsableQuote(text)).toBe(false);
+  });
+
+  it("still accepts a careers page where the company talks about itself", () => {
+    // A job ad is the most candid document a company publishes about its own
+    // problems, so the first-person parts stay in scope.
+    expect(isUsableQuote("Our on-call rotation has four engineers and nobody wants to be on it any more.")).toBe(true);
+  });
+});
