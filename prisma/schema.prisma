@@ -1,0 +1,353 @@
+// Rainmaker data model.
+//
+// Isolation rule: every campaign and everything hanging off it is scoped by
+// the session userId resolved server-side. A client-supplied id is never
+// trusted. Foreign keys give referential integrity, not authorization.
+//
+// Suppression is the one table that is deliberately *global* to a user rather
+// than per-campaign: if someone asks to stop hearing from you, that applies to
+// every campaign you ever run, not just the one that annoyed them.
+
+generator client {
+  provider      = "prisma-client-js"
+  output        = "../src/generated/prisma"
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum CampaignStatus {
+  ingesting
+  running
+  paused
+  failed
+  finished
+}
+
+enum LeadStatus {
+  discovered
+  qualifying
+  qualified
+  rejected
+  enrolled
+}
+
+enum DealStage {
+  prospect
+  contacted
+  engaged
+  meeting_booked
+  proposal
+  won
+  lost
+}
+
+enum EnrollmentState {
+  pending
+  active
+  replied
+  meeting
+  won
+  lost
+  unsubscribed
+  bounced
+  exhausted
+}
+
+enum MessageDirection {
+  outbound
+  inbound
+}
+
+enum MessageStatus {
+  drafted
+  awaiting_approval
+  queued
+  sent
+  failed
+  blocked
+  received
+}
+
+enum SuppressionReason {
+  unsubscribed
+  hard_bounce
+  complained
+  manual
+  not_interested
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String?
+  createdAt    DateTime @default(now())
+
+  campaigns    Campaign[]
+  suppressions Suppression[]
+
+  @@map("users")
+}
+
+model Campaign {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// The one input: the seller's own website.
+  sourceUrl String
+  name      String
+  status    CampaignStatus @default(ingesting)
+  error     String?
+
+  /// Extracted Offering (see src/core/types.ts).
+  offering Json?
+  /// Derived Icp.
+  icp      Json?
+
+  /// SenderIdentity + ComplianceConfig, as configured by the operator.
+  senderIdentity   Json?
+  complianceConfig Json?
+
+  /// Nothing is transmitted to a real recipient until the operator arms this.
+  liveSending Boolean @default(false)
+  /// Where interested prospects are sent to book time.
+  meetingLink String?
+
+  /// How many leads the agent should keep in flight.
+  targetLeads Int @default(25)
+  /// Minimum fit score required before a lead is enrolled.
+  minFitScore Int @default(55)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  leads       Lead[]
+  enrollments Enrollment[]
+  messages    Message[]
+  deals       Deal[]
+  events      Event[]
+  runs        AgentRun[]
+
+  @@index([userId, createdAt])
+  @@map("campaigns")
+}
+
+model Lead {
+  id         String   @id @default(cuid())
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  domain      String
+  companyName String
+  url         String
+  status      LeadStatus @default(discovered)
+
+  /// Where this lead came from, e.g. "directory: https://…".
+  discoveredVia String
+
+  /// LeadProfile from src/core/types.ts.
+  profile        Json?
+  /// FitResult, including the per-signal breakdown.
+  fit            Json?
+  fitScore       Int?
+  fitBand        String?
+  /// Set when qualification ruled the lead out.
+  rejectedReason String?
+
+  createdAt   DateTime  @default(now())
+  qualifiedAt DateTime?
+
+  contacts    Contact[]
+  enrollments Enrollment[]
+  deals       Deal[]
+
+  @@unique([campaignId, domain])
+  @@index([campaignId, status])
+  @@index([campaignId, fitScore])
+  @@map("leads")
+}
+
+model Contact {
+  id     String @id @default(cuid())
+  leadId String
+  lead   Lead   @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  email  String
+  name   String?
+  title  String?
+  /// "role" (info@) or "individual".
+  kind   String
+  /// The page the address was published on — the lawful-basis paper trail.
+  source String
+
+  createdAt DateTime @default(now())
+
+  enrollments Enrollment[]
+  messages    Message[]
+
+  @@unique([leadId, email])
+  @@map("contacts")
+}
+
+model Enrollment {
+  id         String   @id @default(cuid())
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  leadId     String
+  lead       Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  contactId  String
+  contact    Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  sequenceName  String
+  /// Serialised Sequence, so changing the default cadence cannot rewrite history.
+  sequence      Json
+  state         EnrollmentState @default(pending)
+  nextStepIndex Int             @default(0)
+
+  enrolledAt DateTime  @default(now())
+  lastSentAt DateTime?
+  repliedAt  DateTime?
+  /// When the next cadence step becomes due.
+  nextDueAt  DateTime?
+
+  messages Message[]
+
+  @@unique([contactId])
+  @@index([campaignId, state, nextDueAt])
+  @@map("enrollments")
+}
+
+model Message {
+  id           String      @id @default(cuid())
+  campaignId   String
+  campaign     Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contactId    String
+  contact      Contact     @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  enrollmentId String?
+  enrollment   Enrollment? @relation(fields: [enrollmentId], references: [id], onDelete: SetNull)
+
+  direction MessageDirection
+  status    MessageStatus
+
+  toEmail   String
+  fromEmail String
+  subject   String
+  body      String
+
+  /// Which cadence step produced this, if any.
+  stepIndex     Int?
+  stepIntent    String?
+  /// "llm" | "llm-repaired" | "template" — how the copy was produced.
+  composedVia   String?
+  /// Seller claims the copy made, for audit.
+  citedEvidence Json?
+
+  /// Why a blocked message was blocked (a ComplianceBlockCode).
+  blockedCode   String?
+  blockedReason String?
+  /// Transport-level failure.
+  error         String?
+
+  /// ReplyAnalysis, for inbound messages.
+  analysis Json?
+
+  /// RFC 5322 Message-ID, so replies can be threaded.
+  messageId String?
+  inReplyTo String?
+
+  createdAt DateTime  @default(now())
+  sentAt    DateTime?
+
+  @@index([campaignId, createdAt])
+  @@index([contactId, createdAt])
+  @@index([campaignId, direction, status])
+  @@map("messages")
+}
+
+model Deal {
+  id         String   @id @default(cuid())
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  leadId     String
+  lead       Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  stage      DealStage @default(prospect)
+  /// Set when the deal reaches meeting_booked.
+  meetingAt  DateTime?
+  /// Operator-recorded value, if any.
+  valueCents Int?
+  notes      String?
+
+  /// Why it was lost, when it was.
+  lostReason String?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  closedAt  DateTime?
+
+  @@unique([leadId])
+  @@index([campaignId, stage])
+  @@map("deals")
+}
+
+/// Global per-user do-not-contact list. Checked before every single send.
+model Suppression {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  email            String
+  reason           SuppressionReason
+  note             String?
+  /// Which campaign triggered it, for the audit trail.
+  sourceCampaignId String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, email])
+  @@index([userId])
+  @@map("suppressions")
+}
+
+/// Append-only audit log of everything the agent did and why.
+model Event {
+  id         String   @id @default(cuid())
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  /// e.g. "ingest.complete", "lead.qualified", "send.blocked", "reply.classified".
+  kind    String
+  level   String @default("info") // info | warn | error
+  message String
+  /// Arbitrary structured detail.
+  data    Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([campaignId, createdAt])
+  @@index([campaignId, kind])
+  @@map("events")
+}
+
+/// One tick of the orchestrator.
+model AgentRun {
+  id         String   @id @default(cuid())
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  ok         Boolean   @default(true)
+  error      String?
+
+  /// Per-stage counts: discovered, qualified, enrolled, sent, blocked, replies.
+  summary Json?
+
+  @@index([campaignId, startedAt])
+  @@map("agent_runs")
+}
