@@ -7,6 +7,7 @@ import { validateDraft } from "../src/core/draft";
 import { buildCorpus } from "../src/core/provenance";
 import { classifyReply } from "../src/core/classify";
 import { parsePage } from "../src/infra/extract";
+import { parseEml } from "../src/infra/transport/outbox";
 import { NullLlm } from "../src/infra/llm";
 import type { DealStage } from "../src/core/types";
 import { icp, lead, offering, sender } from "./factories";
@@ -341,5 +342,42 @@ describe("enrollmentEventFor", () => {
 
   it("pauses the cadence on any other reply", () => {
     expect(enrollmentEventFor("objection")).toBe("replied");
+  });
+});
+
+describe("parseEml", () => {
+  const headers = [
+    "Message-ID: <abc@fableworks.test>",
+    "Date: Tue, 10 Mar 2026 09:00:00 GMT",
+    'From: "Lena Hoffman" <lena.hoffman@fableworks.test>',
+    "To: dana@northwind.test",
+    "Subject: Re: on-call engineers paged",
+  ].join("\r\n");
+
+  it("reads a well-formed message", () => {
+    const parsed = parseEml(`${headers}\r\n\r\nWe already use Datadog.`);
+    expect(parsed?.from).toBe("lena.hoffman@fableworks.test");
+    expect(parsed?.subject).toBe("Re: on-call engineers paged");
+    expect(parsed?.body).toBe("We already use Datadog.");
+  });
+
+  it("does not lose the body when the blank line is missing", () => {
+    // Every reply in the first fixture run came back "unclear" because the
+    // sentence the prospect wrote had been parsed as a header.
+    const parsed = parseEml(`${headers}\r\nWe already use Datadog. What would you add?`);
+    expect(parsed?.body).toBe("We already use Datadog. What would you add?");
+  });
+
+  it("unfolds a wrapped header", () => {
+    const parsed = parseEml("From: a@b.test\r\nSubject: a very long\r\n subject line\r\n\r\nbody");
+    expect(parsed?.subject).toBe("a very long subject line");
+  });
+
+  it("returns null when there is no sender", () => {
+    expect(parseEml("Subject: orphan\r\n\r\nbody")).toBeNull();
+  });
+
+  it("handles a message with no body", () => {
+    expect(parseEml(`${headers}\r\n\r\n`)?.body).toBe("");
   });
 });

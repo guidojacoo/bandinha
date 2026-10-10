@@ -127,17 +127,44 @@ export function renderEml(message: OutgoingMessage, messageId: string): string {
   return `${headers.join("\r\n")}\r\n\r\n${message.body.replace(/\r?\n/g, "\r\n")}\r\n`;
 }
 
-/** Minimal RFC 5322 reader: enough for the .eml files we write and read. */
+/**
+ * Minimal RFC 5322 reader.
+ *
+ * It does not simply split on the first blank line. A message whose blank
+ * line is missing — a mailer that dropped it, or a generator with an
+ * over-eager filter — would otherwise have its first paragraph parsed as
+ * headers and silently lost. That happened: every reply in the fixture run
+ * came back as "unclear" because the sentence the prospect actually wrote had
+ * been eaten by the header block. So headers end at the first line that is
+ * neither `Name: value` nor a folded continuation, blank line or not.
+ */
 export function parseEml(raw: string): IncomingMessage | null {
-  const normalised = raw.replace(/\r\n/g, "\n");
-  const split = normalised.indexOf("\n\n");
-  const headerBlock = split < 0 ? normalised : normalised.slice(0, split);
-  const body = split < 0 ? "" : normalised.slice(split + 2);
+  const lines = raw.replace(/\r\n/g, "\n").split("\n");
 
-  // Unfold continuation lines before parsing: a long Subject is wrapped.
-  const unfolded = headerBlock.replace(/\n[ \t]+/g, " ");
+  const headerLines: string[] = [];
+  let bodyStart = lines.length;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    if (line.trim() === "") {
+      bodyStart = i + 1;
+      break;
+    }
+    if (/^[ \t]/.test(line) && headerLines.length > 0) {
+      // A folded continuation of the previous header.
+      headerLines[headerLines.length - 1] += ` ${line.trim()}`;
+      continue;
+    }
+    if (!/^[A-Za-z][A-Za-z0-9-]*:/.test(line)) {
+      bodyStart = i;
+      break;
+    }
+    headerLines.push(line);
+  }
+
+  const body = lines.slice(bodyStart).join("\n");
+
   const headers = new Map<string, string>();
-  for (const line of unfolded.split("\n")) {
+  for (const line of headerLines) {
     const at = line.indexOf(":");
     if (at <= 0) continue;
     headers.set(line.slice(0, at).trim().toLowerCase(), line.slice(at + 1).trim());

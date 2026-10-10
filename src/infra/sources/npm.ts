@@ -134,12 +134,13 @@ export function buildQueries(input: DiscoveryInput): string[] {
 
   if (terms.length === 0) return [];
 
-  const queries: string[] = [];
-  // The strongest hint on its own, then intersections.
-  queries.push(terms[0]!);
-  for (let i = 0; i < Math.min(4, terms.length); i++) {
-    for (let j = i + 1; j < Math.min(5, terms.length); j++) {
-      queries.push(`${terms[i]} ${terms[j]}`);
+  // The strongest hints on their own first, then intersections. Running the
+  // pairs first made every query start with the same leading term, so one
+  // keyword dominated the whole run and the narrower hints were never asked.
+  const queries: string[] = terms.slice(0, 3);
+  for (let gap = 1; gap < Math.min(4, terms.length); gap++) {
+    for (let i = 0; i + gap < Math.min(5, terms.length); i++) {
+      queries.push(`${terms[i]} ${terms[i + gap]}`);
       if (queries.length >= 6) return queries;
     }
   }

@@ -35,17 +35,17 @@ export const seedSource: ProspectSource = {
       );
     }
 
-    const domains = extractDomains(raw.text);
-    const candidates: ProspectCandidate[] = domains
-      .filter((domain) => !input.exclude.has(domain))
-      .map((domain) => ({
-        domain,
-        url: `https://${domain}`,
+    const targets = extractTargets(raw.text);
+    const candidates: ProspectCandidate[] = targets
+      .filter((target) => !input.exclude.has(target.domain))
+      .map((target) => ({
+        domain: target.domain,
+        url: target.url,
         via: "seed" as const,
         reason: "On the operator's seed list.",
       }));
 
-    const notes = [`${domains.length} domain(s) in the seed list, ${candidates.length} not already in the pipeline.`];
+    const notes = [`${targets.length} domain(s) in the seed list, ${candidates.length} not already in the pipeline.`];
     return {
       candidates: dedupeCandidates(candidates, input.exclude).slice(0, input.limit),
       notes,
@@ -80,16 +80,45 @@ async function collectRaw(hints: string[]): Promise<{ text: string; errors: stri
  * markdown list and a comma-separated string all work. Anything that is not a
  * domain is quietly ignored rather than failing the run.
  */
-export function extractDomains(text: string): string[] {
-  const found = new Set<string>();
+export interface SeedTarget {
+  domain: string;
+  /** The URL to crawl, preserving whatever scheme and port were given. */
+  url: string;
+}
+
+export function extractTargets(text: string): SeedTarget[] {
+  const found = new Map<string, SeedTarget>();
   const tokens = text.split(/[\s,;|"'<>()\[\]]+/);
+
   for (const token of tokens) {
     const trimmed = token.trim().replace(/[.,;:]+$/, "");
     if (!trimmed || trimmed.length < 4 || !trimmed.includes(".")) continue;
     // Skip spreadsheet headers and prose that happens to contain a dot.
     if (/^(domain|website|url|company|name|email)$/i.test(trimmed)) continue;
+
     const domain = companyDomainOf(trimmed);
-    if (domain) found.add(domain);
+    if (!domain || found.has(domain)) continue;
+
+    // The scheme and port the operator wrote are kept. `companyDomainOf`
+    // strips them, by design, because a domain is the identity of a lead —
+    // but a list entry of `http://intranet.example.com:8080` means crawl
+    // exactly that, and rebuilding it as `https://intranet.example.com` is
+    // a different machine.
+    found.set(domain, { domain, url: toUrl(trimmed, domain) });
   }
-  return [...found];
+  return [...found.values()];
+}
+
+function toUrl(token: string, domain: string): string {
+  try {
+    const parsed = new URL(/^https?:\/\//i.test(token) ? token : `https://${token}`);
+    return parsed.toString();
+  } catch {
+    return `https://${domain}`;
+  }
+}
+
+/** Just the domains, for callers that do not need the URLs. */
+export function extractDomains(text: string): string[] {
+  return extractTargets(text).map((target) => target.domain);
 }

@@ -2,8 +2,10 @@
   "name": "mercurio",
   "version": "1.0.0",
   "private": true,
-  "description": "Mercurio — a free, open-data autonomous sales agent. One URL in, a worked pipeline out. No paid APIs anywhere.",
-  "engines": { "node": ">=20" },
+  "description": "Mercurio \u2014 a free, open-data autonomous sales agent. One URL in, a worked pipeline out. No paid APIs anywhere.",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "prisma generate && next build",
@@ -18,7 +20,10 @@
     "agent": "tsx src/cli/agent.ts",
     "demo": "tsx src/cli/demo.ts",
     "doctor": "tsx src/cli/doctor.ts",
-    "fixtures": "tsx fixtures/server.ts"
+    "fixtures": "tsx fixtures/server.ts",
+    "fixtures:hosts": "bash fixtures/hosts.sh",
+    "buyers": "tsx fixtures/buyers.ts",
+    "discover": "tsx src/cli/discover.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",

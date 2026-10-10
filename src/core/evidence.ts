@@ -41,13 +41,37 @@ const BOILERPLATE = [
   /\bskip to (main )?content\b/i,
 ];
 
-/** A quote that is mostly navigation words is not evidence. */
+/**
+ * Function words. Their *presence* is what distinguishes prose from a menu.
+ *
+ * The first version of the test below counted short words instead, and
+ * rejected "We get woken up by alerts from the one service we host ourselves
+ * and it is genuinely annoying" — 55% short words, and a perfect piece of
+ * evidence. English prose is full of short words; a navigation menu is a run
+ * of capitalised labels with almost none.
+ */
+const FUNCTION_WORDS = new Set([
+  "a", "an", "the", "and", "or", "but", "if", "of", "to", "in", "on", "at",
+  "by", "for", "with", "from", "as", "is", "are", "was", "were", "be", "been",
+  "being", "we", "our", "us", "i", "you", "your", "they", "their", "it", "its",
+  "this", "that", "these", "those", "has", "have", "had", "do", "does", "did",
+  "not", "no", "so", "than", "then", "when", "while", "because", "about",
+  "into", "over", "up", "out", "down", "off", "more", "most", "very", "just",
+]);
+
+/** A quote that is a navigation menu rather than a sentence. */
 function looksLikeNavigation(quote: string): boolean {
   const words = quote.split(/\s+/).filter(Boolean);
   if (words.length < 6) return true;
-  // A run of short capitalised words separated by punctuation is a menu.
-  const shortWords = words.filter((w) => w.length <= 3).length;
-  return shortWords / words.length > 0.5;
+
+  const functionWords = words.filter((w) => FUNCTION_WORDS.has(w.toLowerCase().replace(/[^a-z']/g, ""))).length;
+  const capitalised = words.filter((w) => /^[A-Z]/.test(w)).length;
+
+  // Prose has connective tissue. A line with essentially none of it, and
+  // mostly capitalised words, is a menu.
+  if (functionWords / words.length < 0.12 && capitalised / words.length > 0.5) return true;
+  // Pipe and bullet separators are a menu whatever the words are.
+  return (quote.match(/[|·•»]/g) ?? []).length >= 2;
 }
 
 export function isUsableQuote(quote: string): boolean {

@@ -83,7 +83,17 @@ export interface TickOptions {
 
 export async function tick(options: TickOptions): Promise<TickSummary> {
   const budget = { ...DEFAULT_TICK_BUDGET, ...options.budget };
-  const now = options.now ?? new Date();
+  /**
+   * The clock, read per phase rather than once per tick.
+   *
+   * A single timestamp taken at the start looks tidier and is wrong: a lead
+   * enrolled during the discovery phase has an `enrolledAt` *after* that
+   * timestamp, so its first touch was never due in the tick that created it
+   * and every lead silently waited a full cycle for its first email. Tests
+   * still pin the clock by passing `now`.
+   */
+  const clock = () => options.now ?? new Date();
+  const now = clock();
 
   const summary: TickSummary = {
     repliesRead: 0, suppressed: 0, escalated: 0, answered: 0,
@@ -114,9 +124,9 @@ export async function tick(options: TickOptions): Promise<TickSummary> {
   const inbox = options.inbox ?? createInbox();
 
   try {
-    await readReplies({ ...options, now, campaign, context, inbox, transport, budget, summary, say });
-    await fillPipeline({ ...options, now, campaign, context, budget, summary, say });
-    await sendDue({ ...options, now, campaign, context, transport, budget, summary, say });
+    await readReplies({ ...options, now: clock(), campaign, context, inbox, transport, budget, summary, say });
+    await fillPipeline({ ...options, now: clock(), campaign, context, budget, summary, say });
+    await sendDue({ ...options, now: clock(), campaign, context, transport, budget, summary, say });
 
     summary.llm = options.llm.available() ? budgetSummary(options.llm.budget()) : "no LLM configured (deterministic copy)";
 
@@ -351,7 +361,7 @@ async function fillPipeline(args: PhaseArgs): Promise<void> {
     orderBy: { createdAt: "asc" },
   });
 
-  if (pending.length === 0 && live < campaign.targetLeads * 2) {
+  if (args.budget.maxDiscover > 0 && pending.length === 0 && live < campaign.targetLeads * 2) {
     const known = new Set((await db.lead.findMany({
       where: { campaignId: campaign.id },
       select: { domain: true },
@@ -708,7 +718,10 @@ async function deliver(args: PhaseArgs & {
   }
 
   await db.message.create({
-    data: { ...common, status: "sent", sentAt: new Date(), messageId: result.messageId, inReplyTo: args.inReplyTo },
+    // The tick's clock, not the wall clock. They are the same in production
+    // and differ in a replay or a pinned-clock demo, where a message dated
+    // "now" would fall outside the day the caps are counted over.
+    data: { ...common, status: "sent", sentAt: now, messageId: result.messageId, inReplyTo: args.inReplyTo },
   });
   return "sent";
 }

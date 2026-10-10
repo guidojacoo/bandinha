@@ -99,3 +99,19 @@ describe("similar", () => {
     expect(similar("Our on-call rotation is painful", "We are hiring three backend engineers")).toBe(false);
   });
 });
+
+describe("looksLikeNavigation, via isUsableQuote", () => {
+  it("accepts ordinary prose that happens to be full of short words", () => {
+    // This exact sentence was rejected as a navigation menu — 55% of its
+    // words are three characters or shorter, and it is perfect evidence.
+    expect(isUsableQuote("We get woken up by alerts from the one service we host ourselves and it is genuinely annoying.")).toBe(true);
+  });
+
+  it("still rejects a capitalised menu with no connective words", () => {
+    expect(isUsableQuote("Platform Pricing Customers Resources Company Careers Login Start Free")).toBe(false);
+  });
+
+  it("rejects a pipe-separated breadcrumb", () => {
+    expect(isUsableQuote("Engineering | Observability | Reliability | Incident Response and Alerting")).toBe(false);
+  });
+});

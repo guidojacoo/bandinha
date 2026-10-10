@@ -62,7 +62,9 @@ export async function ingest(
   if (modelOffering.note) notes.push(modelOffering.note);
 
   options.onProgress?.("Working out who buys it…");
-  const heuristicIcp = inferIcp(offering);
+  // The crawled text is passed in so the deterministic path can mine the
+  // seller's own phrasing of the problem, not just its feature headings.
+  const heuristicIcp = inferIcp(offering, crawl.pages.map((p) => p.text).join("\n"));
   const modelIcp = await askForIcp(llm, offering, crawl);
 
   const icp = modelIcp.icp ?? heuristicIcp;
@@ -137,10 +139,32 @@ function pickOneLiner(home: PageText, companyName: string): string {
   return `${companyName} — see ${home.url}`;
 }
 
+/**
+ * Pages that describe what is being sold, in preference order.
+ *
+ * `/pricing` is deliberately absent. It used to be in the same alternation
+ * and, being earlier in crawl order, won: its only heading is the word
+ * "Pricing", so capabilities came back empty, which silently emptied the
+ * technology signals and the buyer titles too — the ICP then addressed
+ * "Founder, Owner" for a platform engineering tool. `readPricing` handles
+ * that page separately.
+ */
+const PRODUCT_PAGE_PATTERNS = [
+  /\/(products?|features?|platform)\b/i,
+  /\/(solutions?|services?|what-we-do)\b/i,
+];
+
 function readProducts(pages: PageText[], companyName: string, oneLiner: string): Product[] {
-  const productPage = pages.find((p) => /\/(products?|services?|solutions?|features?|platform|pricing)\b/i.test(p.url));
-  const capabilities = (productPage ?? pages[0]!).headings
-    .filter((h) => h.length >= 8 && h.length <= 70 && !/^(pricing|faq|contact|about|blog|careers?|customers?)\b/i.test(h))
+  const productPage =
+    PRODUCT_PAGE_PATTERNS.map((pattern) => pages.find((p) => pattern.test(p.url))).find(Boolean) ?? pages[0]!;
+
+  const capabilities = productPage.headings
+    // Meta headings ("How X works", "Why us", "FAQ") describe the page, not
+    // the product, and read as nonsense when spliced into a sentence.
+    .filter((h) => h.length >= 6 && h.length <= 70)
+    .filter((h) => !/^(pricing|faq|contact|about|blog|careers?|customers?|overview|testimonials?)\b/i.test(h))
+    .filter((h) => !/^(how|why|what|who|when|where)\b/i.test(h))
+    .filter((h) => !/\?$/.test(h))
     .slice(0, 6);
 
   return [{
@@ -173,10 +197,16 @@ function positioningPhrases(pages: PageText[]): string[] {
     const title = page.title.split(/[|–—:·]/).map((p) => p.trim()).filter((p) => p.length >= 8 && p.length <= 70);
     for (const part of title.slice(1)) phrases.add(part);
     for (const heading of page.headings.slice(0, 2)) {
-      if (heading.length >= 8 && heading.length <= 70) phrases.add(heading);
+      if (heading.length < 8 || heading.length > 70) continue;
+      // "How X works" is about the page, not the category.
+      if (/^(how|why|what|who|when|where)\b/i.test(heading) || /\?$/.test(heading)) continue;
+      phrases.add(heading);
     }
   }
-  if (pages[0]?.description) phrases.add(pages[0].description.slice(0, 160));
+  // The meta description is prose, not a category label. Mining it for
+  // competitor phrases produced "pager only goes", "actually breaking" and
+  // "something that matters" — none of which identify a competitor, all of
+  // which were about to be used to disqualify prospects.
   return [...phrases].slice(0, 12);
 }
 

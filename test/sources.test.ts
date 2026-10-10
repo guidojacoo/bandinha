@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { brandOf, companyDomainOf, dedupeCandidates, isPlatformHost, registrableDomain, type ProspectCandidate } from "../src/infra/sources/types";
 import { harvestOutboundLinks } from "../src/infra/sources/directory";
-import { extractDomains } from "../src/infra/sources/seed";
+import { extractDomains, extractTargets } from "../src/infra/sources/seed";
 import { buildQueries as buildNpmQueries } from "../src/infra/sources/npm";
 import { buildQueries as buildGithubQueries } from "../src/infra/sources/github";
 import { buildQuery as buildOverpassQuery } from "../src/infra/sources/osm";
@@ -241,5 +241,23 @@ describe("the source registry", () => {
     const search = described.find((s) => s.id === "search");
     expect(search?.configured).toBe(false);
     expect(search?.needs).toMatch(/SEARXNG_URL/);
+  });
+});
+
+describe("extractTargets", () => {
+  it("keeps the scheme and port the operator wrote", () => {
+    // companyDomainOf strips them by design, because a domain is the identity
+    // of a lead — but a seed entry naming a port means crawl that port.
+    const targets = extractTargets("http://intranet.example.test:8080/");
+    expect(targets[0]?.domain).toBe("example.test");
+    expect(targets[0]?.url).toBe("http://intranet.example.test:8080/");
+  });
+
+  it("defaults to https for a bare domain", () => {
+    expect(extractTargets("acme.test")[0]?.url).toBe("https://acme.test/");
+  });
+
+  it("keeps a path, so a seed entry can point at a subsection", () => {
+    expect(extractTargets("https://acme.test/engineering")[0]?.url).toBe("https://acme.test/engineering");
   });
 });

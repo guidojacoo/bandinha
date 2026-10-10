@@ -31,7 +31,7 @@ import type { Icp, Offering, SourcedClaim } from "./types";
  */
 const GRAMMATICAL = new Set([
   "a", "an", "the", "and", "or", "but", "for", "of", "to", "in", "on", "at",
-  "by", "with", "from", "as", "is", "are", "was", "were", "be", "been",
+  "by", "with", "without", "from", "as", "is", "are", "was", "were", "be", "been",
   "that", "this", "these", "those", "it", "its", "we", "our", "us", "you",
   "your", "they", "their", "all", "any", "more", "most", "other", "into",
   "than", "then", "so", "no", "not", "can", "will", "just", "about", "over",
@@ -41,10 +41,28 @@ const GRAMMATICAL = new Set([
 function words(text: string): string[] {
   return text
     .toLowerCase()
+    // Dots are kept so "node.js" survives, then trimmed from the edges so a
+    // sentence-final token does not become the phrase "actually breaking.".
     .replace(/[^a-z0-9+#. ]+/g, " ")
     .split(/\s+/)
+    .map((w) => w.replace(/^\.+|\.+$/g, ""))
     .filter(Boolean);
 }
+
+/**
+ * Nouns that name the *buyer*, not the category.
+ *
+ * "platform teams" came out of the seller's own tagline as a top competitor
+ * phrase, and disqualifiers are matched against how a prospect describes
+ * itself — so any prospect calling itself a platform team would have been
+ * thrown away as a competitor.
+ */
+const BUYER_NOUNS = new Set([
+  "teams", "team", "companies", "company", "customers", "clients", "users",
+  "businesses", "business", "engineers", "developers", "operators",
+  "organisations", "organizations", "orgs", "startups", "enterprises",
+  "practices", "agencies", "firms", "brands", "owners", "managers", "people",
+]);
 
 /** Two- and three-word phrases, grammatical words trimmed from the edges. */
 function phrases(text: string): string[] {
@@ -83,14 +101,14 @@ export function competitorPhrases(offering: Offering, limit = 10): string[] {
   };
 
   for (const p of offering.positioningPhrases) bump(p, 8);
-  bump(offering.oneLiner, 6);
-  for (const c of offering.categories) bump(c, 6);
+  for (const c of offering.categories) bump(c, 8);
   for (const product of offering.products) {
+    for (const capability of product.capabilities) bump(capability, 4);
     bump(product.name, 3);
-    bump(product.summary, 1);
-    for (const capability of product.capabilities) bump(capability, 2);
   }
-  for (const claim of offering.valueProps) bump(claim.text, 1);
+  // The one-liner and the benefit copy are deliberately NOT mined. They mix
+  // what a company *is* with who it sells to and what it does for them, so
+  // phrases drawn from them disqualify customers as often as competitors.
 
   // The seller's own name is not a category; matching on it flags anyone who
   // merely mentions them.
@@ -100,6 +118,7 @@ export function competitorPhrases(offering: Offering, limit = 10): string[] {
 
   const ranked = [...scores.entries()]
     .filter(([phrase]) => !isSelfReference(phrase))
+    .filter(([phrase]) => !BUYER_NOUNS.has(phrase.split(" ").slice(-1)[0] ?? ""))
     // On a tie the longer phrase wins: it is the more specific category, and
     // the shorter one is usually just a window onto it.
     .sort((a, b) =>
@@ -146,8 +165,17 @@ const DEV_CUES =
 const LOCAL_CUES =
   /\b(restaurant|cafe|caf[eé]|bar|hotel|salon|barber|clinic|dentist|dental|gym|fitness|studio|store|shop|retail|boutique|bakery|plumb(er|ing)|electrician|contractor|landscap(er|ing)|roofing|hvac|garage|mechanic|veterinar|pharmacy|florist|laundry|local business|walk[- ]in|foot traffic|storefront|neighbourhood|neighborhood)\b/i;
 
-const NPM_CUES = /\b(npm|node\.?js|javascript|typescript|react|next\.?js|frontend|web app)\b/i;
-const PYPI_CUES = /\b(pypi|python|django|flask|fastapi|pandas|data ?science|machine learning|notebook)\b/i;
+/**
+ * PyPI is not a source here, and that is a finding rather than an omission.
+ *
+ * It was planned as the Python counterpart to npm, until its robots.txt
+ * turned out to disallow both its search path and its per-project JSON
+ * endpoint (`Disallow: /search*` and `Disallow: /pypi/<name>/json`) — and this
+ * project's crawler honours robots.txt. There is no permitted search surface,
+ * so Python-ecosystem prospects come from GitHub filtered by language
+ * instead. Centralising robots handling in one fetch path is what surfaced
+ * this before it shipped.
+ */
 
 const SOURCE_PROFILES: SourceProfile[] = [
   {
@@ -161,13 +189,17 @@ const SOURCE_PROFILES: SourceProfile[] = [
   },
   {
     id: "npm",
-    cues: NPM_CUES,
-    hint: (offering) => uniqueLower(technologyTerms(offering)).slice(0, 8),
-  },
-  {
-    id: "pypi",
-    cues: PYPI_CUES,
-    hint: (offering) => uniqueLower(technologyTerms(offering)).slice(0, 8),
+    // Deliberately the full developer cue, not just the JavaScript one. The
+    // question is not "does the seller talk about npm" but "do its buyers
+    // publish packages", and for any developer tool they do. Routing an
+    // observability ICP away from npm because its own copy never says
+    // "javascript" skipped the only discovery source proven to work.
+    cues: DEV_CUES,
+    hint: (offering, icp) => uniqueLower([
+      ...technologyTerms(offering),
+      ...offering.categories,
+      ...(icp.positiveSignals ?? []).filter((s) => DEV_CUES.test(s)),
+    ]).slice(0, 10),
   },
   {
     id: "osm",
@@ -318,7 +350,73 @@ const TITLE_RULES: Array<[RegExp, string[]]> = [
  * address — so every UK company scored as a perfect industry match. An empty
  * list costs one scoring signal; a wrong list silently corrupts every score.
  */
-export function inferIcp(offering: Offering): Icp {
+/**
+ * Head nouns that carry no meaning on their own.
+ *
+ * "Error budget tracking" is a useful signal; "tracking" matches every site
+ * on the web. Dropping these from the tail of a phrase yields the part a
+ * prospect with the problem would actually write.
+ */
+const GENERIC_HEADS = new Set([
+  "tracking", "integration", "integrations", "management", "monitoring",
+  "platform", "software", "tool", "tools", "solution", "solutions", "system",
+  "systems", "service", "services", "suite", "api", "apis", "dashboard",
+  "dashboards", "reporting", "reports", "analytics", "automation", "support",
+]);
+
+/**
+ * Words too common to be a signal on their own.
+ *
+ * This matters more than it looks. A single-word signal becomes a search for
+ * that word on a prospect's site, and the sentence it lands in becomes the
+ * evidence that justifies writing to them. "Error budget tracking" correctly
+ * yielded "error" and "budget", which would have matched a sentence about
+ * marketing budgets and presented it as proof we understood their problem.
+ */
+const WEAK_SINGLE_WORDS = new Set([
+  "error", "budget", "works", "work", "using", "used", "build", "built",
+  "make", "made", "help", "helps", "data", "time", "scale", "speed", "cost",
+  "costs", "price", "prices", "value", "quality", "growth", "process",
+  "project", "product", "products", "first", "every", "better", "faster",
+  "simple", "easy", "modern", "global", "across", "within", "around",
+]);
+
+/**
+ * Keywords a prospect with this problem would have on their own site.
+ *
+ * Derived from what the product *does*, because that is the one thing the
+ * seller's site always states plainly. A phrase contributes itself, itself
+ * minus a generic head noun, and its distinctive single words — so "Burn rate
+ * alerts" yields "burn rate alerts", "burn rate" and "alerts", and a prospect
+ * mentioning any of them is found.
+ */
+function signalsFromCapabilities(offering: Offering): string[] {
+  const out: string[] = [];
+  const phrases = [
+    ...offering.products.flatMap((p) => p.capabilities),
+    ...offering.positioningPhrases,
+    ...offering.categories,
+  ];
+
+  for (const raw of phrases) {
+    const tokens = words(raw).filter((w) => w.length > 2 && !GRAMMATICAL.has(w));
+    if (tokens.length === 0) continue;
+    if (tokens.length <= 4) out.push(tokens.join(" "));
+
+    const last = tokens[tokens.length - 1] ?? "";
+    if (tokens.length >= 2 && GENERIC_HEADS.has(last)) {
+      out.push(tokens.slice(0, -1).join(" "));
+    }
+    for (const token of tokens) {
+      if (token.length < 5) continue;
+      if (GENERIC_HEADS.has(token) || BUYER_NOUNS.has(token) || WEAK_SINGLE_WORDS.has(token)) continue;
+      out.push(token);
+    }
+  }
+  return out;
+}
+
+export function inferIcp(offering: Offering, corpusText = ""): Icp {
   const haystack = [
     offering.oneLiner,
     offering.categories.join(" "),
@@ -331,10 +429,17 @@ export function inferIcp(offering: Offering): Icp {
     TITLE_RULES.filter(([pattern]) => pattern.test(haystack)).flatMap(([, titles]) => titles),
   );
 
+  // Two sources, deliberately different in kind. Capabilities say what the
+  // product does, which is what a prospect with the problem writes about.
+  // Problem-cue sentences in the seller's own copy say how they phrase the
+  // status quo, which is often the prospect's phrasing too.
   const painSignals = uniqueLower([
-    ...offering.products.flatMap((p) => p.capabilities),
-    ...offering.valueProps.map((v) => v.text),
-  ].flatMap(problemPhrases)).slice(0, 14);
+    ...signalsFromCapabilities(offering),
+    ...[...offering.valueProps.map((v) => v.text), offering.oneLiner, corpusText].flatMap(problemPhrases),
+  ])
+    .filter(isPlausibleSignal)
+    .filter((signal) => !isSellerBrandWord(signal, offering))
+    .slice(0, 18);
 
   const positiveSignals = uniqueLower([
     ...technologyTerms(offering),
@@ -375,12 +480,20 @@ function problemPhrases(text: string): string[] {
   ];
   for (const pattern of patterns) {
     for (const match of text.matchAll(pattern)) {
-      const phrase = (match[1] ?? "")
-        .split(/\s+/)
-        .filter((w) => w.length > 2 && !GRAMMATICAL.has(w.toLowerCase()))
-        .join(" ")
-        .toLowerCase();
-      if (phrase.length >= 5) out.push(phrase);
+      // Truncate at the first grammatical word rather than deleting it.
+      // Deleting produced "alert volume without turning" -> "alert volume
+      // turning", and "stop paging engineers for alerts" -> "paging
+      // engineers alerts": keyword soup that matches nothing on a real site.
+      const tokens: string[] = [];
+      for (const raw of (match[1] ?? "").split(/\s+/)) {
+        const word = raw.toLowerCase();
+        if (word.length <= 2 || GRAMMATICAL.has(word)) break;
+        tokens.push(word);
+      }
+      // Two words minimum: a single word is too generic to be worth
+      // matching against a prospect's site.
+      const phrase = tokens.join(" ");
+      if (tokens.length >= 2 && phrase.length >= 7) out.push(phrase);
     }
   }
   return out;
@@ -438,6 +551,12 @@ export function normaliseIcp(partial: Partial<Icp>, offering: Offering): Icp {
     preferredSources: uniqueLower([...requested, ...routed.preferredSources]),
     sourceHints: { ...routed.sourceHints, ...(partial.sourceHints ?? {}) },
   };
+}
+
+/** The seller's own name is not a signal that a prospect has a problem. */
+function isSellerBrandWord(signal: string, offering: Offering): boolean {
+  const brand = new Set(words(offering.companyName));
+  return signal.split(" ").some((token) => brand.has(token));
 }
 
 /** Rejects address fragments and single letters masquerading as industries. */
