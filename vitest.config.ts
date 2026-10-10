@@ -1,8 +1,8 @@
 import { defineConfig } from "vitest/config";
 
-// Only the pure core is unit-tested here: scoring, sequencing, compliance,
-// classification and parsing. Nothing in this suite touches the network,
-// the database, or an LLM.
+// Only pure modules are unit-tested: scoring, evidence, deliverability,
+// provenance, cadence, compliance, classification, parsing and the LLM
+// budget. Nothing here touches the network, the database or a model.
 export default defineConfig({
   test: { environment: "node", include: ["test/**/*.test.ts"] },
 });

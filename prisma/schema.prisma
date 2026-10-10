@@ -1,83 +1,27 @@
-// Rainmaker data model.
+// Mercurio data model.
 //
-// Isolation rule: every campaign and everything hanging off it is scoped by
-// the session userId resolved server-side. A client-supplied id is never
-// trusted. Foreign keys give referential integrity, not authorization.
+// SQLite on purpose. The whole product has to be free and setup-free: no
+// database server, no hosted tier, no account. The file lives in ./data and
+// `npm run setup` creates it. Postgres remains a one-line change for anyone
+// who outgrows it.
 //
-// Suppression is the one table that is deliberately *global* to a user rather
-// than per-campaign: if someone asks to stop hearing from you, that applies to
-// every campaign you ever run, not just the one that annoyed them.
+// Two consequences of SQLite, handled deliberately:
+//   - No native enums. Status columns are String, with TypeScript union types
+//     in src/core/types.ts as the single source of truth.
+//   - No Json column type. Structured fields are TEXT holding JSON, read and
+//     written through the typed helpers in src/lib/json.ts.
+//
+// Isolation rule: everything hanging off a Campaign is scoped by the session
+// userId resolved server-side. A client-supplied id is never trusted.
 
 generator client {
-  provider      = "prisma-client-js"
-  output        = "../src/generated/prisma"
-  binaryTargets = ["native", "rhel-openssl-3.0.x"]
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
-}
-
-enum CampaignStatus {
-  ingesting
-  running
-  paused
-  failed
-  finished
-}
-
-enum LeadStatus {
-  discovered
-  qualifying
-  qualified
-  rejected
-  enrolled
-}
-
-enum DealStage {
-  prospect
-  contacted
-  engaged
-  meeting_booked
-  proposal
-  won
-  lost
-}
-
-enum EnrollmentState {
-  pending
-  active
-  replied
-  meeting
-  won
-  lost
-  unsubscribed
-  bounced
-  exhausted
-}
-
-enum MessageDirection {
-  outbound
-  inbound
-}
-
-enum MessageStatus {
-  drafted
-  awaiting_approval
-  queued
-  sent
-  failed
-  blocked
-  received
-}
-
-enum SuppressionReason {
-  unsubscribed
-  hard_bounce
-  complained
-  manual
-  not_interested
 }
 
 model User {
@@ -101,26 +45,24 @@ model Campaign {
   /// The one input: the seller's own website.
   sourceUrl String
   name      String
-  status    CampaignStatus @default(ingesting)
+  /// ingesting | running | paused | failed
+  status    String  @default("ingesting")
   error     String?
 
-  /// Extracted Offering (see src/core/types.ts).
-  offering Json?
-  /// Derived Icp.
-  icp      Json?
+  /// JSON: Offering
+  offering String?
+  /// JSON: Icp
+  icp      String?
+  /// JSON: SenderIdentity
+  senderIdentity String?
+  /// JSON: Partial<ComplianceConfig>
+  complianceConfig String?
 
-  /// SenderIdentity + ComplianceConfig, as configured by the operator.
-  senderIdentity   Json?
-  complianceConfig Json?
-
-  /// Nothing is transmitted to a real recipient until the operator arms this.
+  /// Nothing reaches a real recipient until this is armed AND SMTP is set.
   liveSending Boolean @default(false)
-  /// Where interested prospects are sent to book time.
   meetingLink String?
 
-  /// How many leads the agent should keep in flight.
   targetLeads Int @default(25)
-  /// Minimum fit score required before a lead is enrolled.
   minFitScore Int @default(55)
 
   createdAt DateTime @default(now())
@@ -145,18 +87,17 @@ model Lead {
   domain      String
   companyName String
   url         String
-  status      LeadStatus @default(discovered)
-
-  /// Where this lead came from, e.g. "directory: https://…".
+  /// discovered | qualifying | qualified | rejected | enrolled
+  status      String @default("discovered")
+  /// Which source found it, and how. Shown in the console.
   discoveredVia String
 
-  /// LeadProfile from src/core/types.ts.
-  profile        Json?
-  /// FitResult, including the per-signal breakdown.
-  fit            Json?
-  fitScore       Int?
-  fitBand        String?
-  /// Set when qualification ruled the lead out.
+  /// JSON: LeadProfile — includes the evidence quotes outreach may use.
+  profile String?
+  /// JSON: FitResult, including the per-signal breakdown.
+  fit      String?
+  fitScore Int?
+  fitBand  String?
   rejectedReason String?
 
   createdAt   DateTime  @default(now())
@@ -177,13 +118,18 @@ model Contact {
   leadId String
   lead   Lead   @relation(fields: [leadId], references: [id], onDelete: Cascade)
 
-  email  String
-  name   String?
-  title  String?
-  /// "role" (info@) or "individual".
-  kind   String
+  email String
+  name  String?
+  title String?
+  /// "role" (info@) or "individual"
+  kind  String
   /// The page the address was published on — the lawful-basis paper trail.
   source String
+
+  /// Deliverability pre-flight result, JSON: DeliverabilityCheck
+  deliverability String?
+  /// Denormalised so enrollment can filter without parsing JSON.
+  deliverable Boolean @default(true)
 
   createdAt DateTime @default(now())
 
@@ -203,16 +149,17 @@ model Enrollment {
   contactId  String
   contact    Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
 
-  sequenceName  String
-  /// Serialised Sequence, so changing the default cadence cannot rewrite history.
-  sequence      Json
-  state         EnrollmentState @default(pending)
-  nextStepIndex Int             @default(0)
+  sequenceName String
+  /// JSON: Sequence — frozen at enrollment so changing the default cadence
+  /// cannot rewrite history.
+  sequence     String
+  /// pending | active | replied | meeting | won | lost | unsubscribed | bounced | exhausted
+  state         String @default("pending")
+  nextStepIndex Int    @default(0)
 
   enrolledAt DateTime  @default(now())
   lastSentAt DateTime?
   repliedAt  DateTime?
-  /// When the next cadence step becomes due.
   nextDueAt  DateTime?
 
   messages Message[]
@@ -231,32 +178,32 @@ model Message {
   enrollmentId String?
   enrollment   Enrollment? @relation(fields: [enrollmentId], references: [id], onDelete: SetNull)
 
-  direction MessageDirection
-  status    MessageStatus
+  /// outbound | inbound
+  direction String
+  /// drafted | awaiting_approval | queued | sent | failed | blocked | received
+  status    String
 
   toEmail   String
   fromEmail String
   subject   String
   body      String
 
-  /// Which cadence step produced this, if any.
-  stepIndex     Int?
-  stepIntent    String?
+  stepIndex  Int?
+  stepIntent String?
   /// "llm" | "llm-repaired" | "template" — how the copy was produced.
-  composedVia   String?
-  /// Seller claims the copy made, for audit.
-  citedEvidence Json?
+  composedVia String?
 
-  /// Why a blocked message was blocked (a ComplianceBlockCode).
+  /// JSON: ProvenanceRecord[] — every factual claim with its source URL.
+  /// A message cannot be sent unless each claim resolves to a crawled page.
+  provenance String?
+
   blockedCode   String?
   blockedReason String?
-  /// Transport-level failure.
   error         String?
 
-  /// ReplyAnalysis, for inbound messages.
-  analysis Json?
+  /// JSON: ReplyAnalysis, for inbound messages.
+  analysis String?
 
-  /// RFC 5322 Message-ID, so replies can be threaded.
   messageId String?
   inReplyTo String?
 
@@ -276,14 +223,11 @@ model Deal {
   leadId     String
   lead       Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
 
-  stage      DealStage @default(prospect)
-  /// Set when the deal reaches meeting_booked.
+  /// prospect | contacted | engaged | meeting_booked | proposal | won | lost
+  stage      String    @default("prospect")
   meetingAt  DateTime?
-  /// Operator-recorded value, if any.
   valueCents Int?
   notes      String?
-
-  /// Why it was lost, when it was.
   lostReason String?
 
   createdAt DateTime  @default(now())
@@ -295,42 +239,41 @@ model Deal {
   @@map("deals")
 }
 
-/// Global per-user do-not-contact list. Checked before every single send.
+/// Global per-user do-not-contact list, checked before every send.
+/// Deliberately not per-campaign: someone who opts out of one campaign is out
+/// of all of them, permanently.
 model Suppression {
   id     String @id @default(cuid())
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  email            String
-  reason           SuppressionReason
-  note             String?
-  /// Which campaign triggered it, for the audit trail.
+  email  String
+  /// unsubscribed | hard_bounce | complained | manual | not_interested | undeliverable
+  reason String
+  note   String?
   sourceCampaignId String?
 
   createdAt DateTime @default(now())
 
   @@unique([userId, email])
-  @@index([userId])
   @@map("suppressions")
 }
 
-/// Append-only audit log of everything the agent did and why.
+/// Append-only audit log of what the agent did and why.
 model Event {
   id         String   @id @default(cuid())
   campaignId String
   campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
-  /// e.g. "ingest.complete", "lead.qualified", "send.blocked", "reply.classified".
   kind    String
-  level   String @default("info") // info | warn | error
+  level   String @default("info")
   message String
-  /// Arbitrary structured detail.
-  data    Json?
+  /// JSON blob of structured detail.
+  data    String?
 
   createdAt DateTime @default(now())
 
   @@index([campaignId, createdAt])
-  @@index([campaignId, kind])
   @@map("events")
 }
 
@@ -344,10 +287,32 @@ model AgentRun {
   finishedAt DateTime?
   ok         Boolean   @default(true)
   error      String?
-
-  /// Per-stage counts: discovered, qualified, enrolled, sent, blocked, replies.
-  summary Json?
+  /// JSON: TickSummary
+  summary    String?
 
   @@index([campaignId, startedAt])
   @@map("agent_runs")
+}
+
+/// Daily LLM token accounting.
+///
+/// Free inference tiers are small (Groq allows roughly 200K tokens/day on the
+/// larger models). The agent tracks spend so it can ration the budget across
+/// a day's work and fall back to deterministic templates when it runs out,
+/// rather than failing halfway through a campaign.
+model TokenLedger {
+  id    String @id @default(cuid())
+  /// UTC date, YYYY-MM-DD.
+  day   String
+  model String
+
+  requests     Int @default(0)
+  inputTokens  Int @default(0)
+  outputTokens Int @default(0)
+  failures     Int @default(0)
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([day, model])
+  @@map("token_ledger")
 }

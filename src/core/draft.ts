@@ -1,153 +1,247 @@
-import { hasOptOut } from "./compliance";
-import type { DraftMessage, DraftValidation, Offering } from "./types";
+import { verifyProvenance, type SourceCorpus } from "./provenance";
+import { isValidSyntax } from "./deliverability";
+import type {
+  DraftMessage,
+  DraftValidation,
+  LeadEvidence,
+  SenderIdentity,
+} from "./types";
 
 /**
- * The last gate before a draft reaches a transport.
+ * The last gate before an address is used.
  *
- * An LLM writing sales copy will, unprompted, invent a customer logo, promise
- * a discount nobody authorised, or leave `{{first_name}}` in the subject line.
- * None of that is caught by a compliance check about volume and consent, so it
- * is caught here: every factual claim must trace back to something the
- * seller's own site actually says.
+ * Everything an LLM writes passes through here. The checks fall into three
+ * groups, and all three have cost us a real failure in testing:
+ *
+ *  1. Mechanics — unfilled placeholders, missing unsubscribe, a subject line
+ *     that was really a paragraph. Cheap to check, embarrassing to send.
+ *  2. Fabrication — provenance verification plus a blacklist of phrasings
+ *     that *invite* invention ("as seen in", "trusted by 500+"). A model told
+ *     to cite proof will manufacture proof if none exists.
+ *  3. Specificity — the message must actually use the evidence that earned
+ *     the right to send it. Attaching a quote to the provenance list and then
+ *     writing a generic email defeats the gate.
  */
 
-/** Template syntax that escaped un-rendered. */
-const PLACEHOLDER_PATTERNS: RegExp[] = [
-  /\{\{\s*[\w.]+\s*\}\}/,      // {{first_name}}
-  /\{\s*[\w.]+\s*\}/,          // {first_name}
-  /\[\s*(?:COMPANY|NAME|FIRST_?NAME|PRODUCT|X)\s*\]/i,
-  /\bTODO\b/,
-  /\bLOREM IPSUM\b/i,
-  /\bINSERT [A-Z ]{3,}\b/,
+export const MAX_SUBJECT_CHARS = 90;
+export const MIN_BODY_CHARS = 180;
+export const MAX_BODY_CHARS = 1400;
+
+/** Template syntax that escaped substitution. */
+const PLACEHOLDER_PATTERNS = [
+  /\{\{\s*[\w.]+\s*\}\}/,
+  /\[\s*(first[_ ]?name|company|insert|your|name|title|x)\b[^\]]*\]/i,
+  /\bFIRSTNAME\b|\bCOMPANYNAME\b/,
+  /<\s*(name|company|insert)[^>]*>/i,
+  /\bTODO\b|\bLorem ipsum\b/i,
 ];
 
-/** Phrases that reveal the sender is a bot pretending otherwise, or are unsafe. */
-const FORBIDDEN_PATTERNS: Array<{ pattern: RegExp; problem: string }> = [
-  { pattern: /\bas an AI\b/i, problem: "reveals a raw model artifact ('as an AI')" },
-  { pattern: /\bI (?:am|'m) an? (?:AI|language model|bot)\b/i, problem: "contains a model self-disclosure artifact" },
-  { pattern: /\bguarantee[ds]?\b.{0,30}\b(?:ROI|revenue|results?|savings?)\b/i, problem: "makes a guaranteed-results claim" },
-  { pattern: /\b(?:100%|fully) guaranteed\b/i, problem: "makes an absolute guarantee" },
-  { pattern: /\brisk[- ]free\b/i, problem: "makes a risk-free claim" },
-  { pattern: /\bact now\b|\blimited time only\b|\bonce[- ]in[- ]a[- ]lifetime\b/i, problem: "uses high-pressure spam language" },
-  { pattern: /\bdear (?:sir|madam|sir\/madam)\b/i, problem: "uses a mail-merge salutation that signals bulk mail" },
+/**
+ * Phrasings that are false unless backed by something we do not have.
+ *
+ * These are not style preferences. Each one asserts a fact about third
+ * parties — customers, publications, headcounts — that a crawl of a
+ * marketing site cannot establish.
+ */
+const UNSUPPORTABLE_PATTERNS: Array<{ pattern: RegExp; why: string }> = [
+  { pattern: /\btrusted by\s+(over\s+)?[\d,]+/i, why: "customer-count claim" },
+  { pattern: /\b(as (seen|featured) in|featured on)\b/i, why: "press claim" },
+  { pattern: /\b(fortune\s*\d+|yc[- ]backed|y combinator)\b/i, why: "affiliation claim" },
+  { pattern: /\b(award[- ]winning|industry[- ]leading|#1\b|number one\b)\b/i, why: "superlative" },
+  { pattern: /\b(we|i)\s+(saw|noticed|read)\s+(your|that you).{0,40}\b(funding|raised|series [a-e]|acquisition|layoffs?)\b/i, why: "company-news claim" },
+  { pattern: /\b(?:\d{1,3}(?:\.\d+)?%|\d+(?:\.\d+)?x)\s+(?:more|less|fewer|lower|higher|faster|cheaper|better|increase|decrease|reduction|improvement|growth|savings?|roi|uplift)\b/i, why: "quantified outcome" },
+  // The same claim stated the other way round. Without this, "reduces pages
+  // by 60%" sailed through while "60% fewer pages" was caught.
+  { pattern: /\b(?:cut|cuts|reduce[sd]?|increase[sd]?|improve[sd]?|boost(?:ed|s)?|save[sd]?|grew|grows?|drop(?:ped|s)?)\b[^.]{0,40}\bby\s+\d{1,3}(?:\.\d+)?%/i, why: "quantified outcome" },
+  { pattern: /\bguarantee(d)?\b/i, why: "guarantee" },
+  { pattern: /\bour (clients?|customers?) (like|such as|including)\b/i, why: "named-customer claim" },
 ];
 
-/** Words that reliably push a message into spam folders. */
-const SPAM_TRIGGER_WORDS = [
-  "free money", "cash bonus", "no credit check", "click here now",
-  "buy now", "order now", "winner", "congratulations you",
+/** Behaviour that gets mail marked as spam regardless of content. */
+const SPAM_PATTERNS: Array<{ pattern: RegExp; why: string }> = [
+  { pattern: /\b(act now|limited time|last chance|urgent)\b/i, why: "false urgency" },
+  { pattern: /\b(risk[- ]free|no obligation|100% free)\b/i, why: "spam-filter trigger" },
+  { pattern: /!{2,}/, why: "repeated exclamation marks" },
+  { pattern: /\b[A-Z]{6,}\b/, why: "shouting" },
 ];
 
-export const SUBJECT_MAX = 78;   // beyond this, clients truncate
-export const SUBJECT_MIN = 10;
-export const BODY_MAX_CHARS = 1600;
-export const BODY_MIN_CHARS = 180;
+function stripSignature(body: string, sender: SenderIdentity): string {
+  // The compliance footer legitimately contains an address and an
+  // unsubscribe link; fabrication checks must not see it as body copy.
+  const markers = [sender.postalAddress, "Unsubscribe", "unsubscribe:"];
+  let cut = body.length;
+  for (const marker of markers) {
+    if (!marker) continue;
+    const at = body.indexOf(marker);
+    if (at >= 0) cut = Math.min(cut, at);
+  }
+  return body.slice(0, cut);
+}
 
-function capsRatio(text: string): number {
-  const letters = text.replace(/[^a-zA-Z]/g, "");
-  if (letters.length < 20) return 0;
-  const caps = letters.replace(/[^A-Z]/g, "").length;
-  return caps / letters.length;
+export interface DraftContext {
+  sender: SenderIdentity;
+  /** The quotes that justified contacting this prospect. */
+  evidence: LeadEvidence[];
+  /** Every page crawled, for provenance verification. */
+  corpus: SourceCorpus;
+  /** Names the copy may legitimately mention. */
+  allowedNames: string[];
+  /** True when the draft answers something the prospect sent us. */
+  isReply?: boolean;
+  /** Off only when the operator has explicitly disabled the evidence gate. */
+  requireEvidenceUse?: boolean;
 }
 
 /**
- * Checks that every proof point the copy leans on actually exists in the
- * offering extracted from the seller's own site.
+ * Validates a draft. `problems` block the send; `warnings` do not.
  *
- * This is the anti-fabrication check: the composer must declare what it cited,
- * and each citation has to be a real substring of a real extracted fact.
+ * The split matters: a hard block on anything merely *suspicious* means the
+ * agent sends nothing and the operator turns the checks off. Only claims that
+ * would be untrue, unlawful, or broken get to block.
  */
-export function verifyCitations(
-  draft: DraftMessage,
-  offering: Offering,
-): { ok: boolean; unknown: string[] } {
-  const known = [
-    ...offering.proofPoints,
-    ...offering.valueProps,
-    ...(offering.positioningPhrases ?? []),
-    ...offering.products.map((p) => p.name),
-    ...offering.products.flatMap((p) => p.capabilities),
-    offering.oneLiner,
-    offering.companyName,
-  ]
-    .filter(Boolean)
-    .map((s) => s.toLowerCase());
-
-  const unknown = draft.citedEvidence.filter((claim) => {
-    const c = claim.toLowerCase().trim();
-    if (c.length === 0) return false;
-    return !known.some((k) => k.includes(c) || c.includes(k));
-  });
-
-  return { ok: unknown.length === 0, unknown };
-}
-
-export function validateDraft(draft: DraftMessage, offering: Offering): DraftValidation {
+export function validateDraft(draft: DraftMessage, ctx: DraftContext): DraftValidation {
   const problems: string[] = [];
   const warnings: string[] = [];
 
-  const subject = draft.subject?.trim() ?? "";
-  const body = draft.body?.trim() ?? "";
+  const subject = draft.subject.trim();
+  const body = draft.body.trim();
+  const copy = stripSignature(body, ctx.sender);
 
-  // --- Subject ---
-  if (subject.length === 0) problems.push("subject is empty");
-  else {
-    if (subject.length < SUBJECT_MIN) warnings.push(`subject is very short (${subject.length} chars)`);
-    if (subject.length > SUBJECT_MAX) problems.push(`subject is ${subject.length} chars; clients truncate past ${SUBJECT_MAX}`);
-    if (/^(re|fwd):/i.test(subject)) problems.push("subject fakes a reply or forward ('Re:'/'Fwd:') on a cold message");
-    if (capsRatio(subject) > 0.5) problems.push("subject is mostly capitals");
-    if ((subject.match(/!/g) ?? []).length > 1) problems.push("subject has multiple exclamation marks");
+  // --- 1. Mechanics ------------------------------------------------------
+  if (!ctx.isReply && subject.length === 0) problems.push("Subject line is empty.");
+  if (subject.length > MAX_SUBJECT_CHARS)
+    problems.push(`Subject is ${subject.length} characters; keep it under ${MAX_SUBJECT_CHARS}.`);
+  if (/\n/.test(draft.subject)) problems.push("Subject contains a line break.");
+  if (body.length < MIN_BODY_CHARS)
+    problems.push(`Body is ${body.length} characters; too short to say anything useful.`);
+  if (body.length > MAX_BODY_CHARS)
+    problems.push(`Body is ${body.length} characters; over the ${MAX_BODY_CHARS} limit.`);
+
+  for (const pattern of PLACEHOLDER_PATTERNS) {
+    const hit = body.match(pattern) ?? draft.subject.match(pattern);
+    if (hit) problems.push(`Unfilled placeholder: ${JSON.stringify(hit[0])}.`);
   }
 
-  // --- Body ---
-  if (body.length === 0) problems.push("body is empty");
-  else {
-    if (body.length < BODY_MIN_CHARS) warnings.push(`body is very short (${body.length} chars)`);
-    if (body.length > BODY_MAX_CHARS) problems.push(`body is ${body.length} chars; keep cold outreach under ${BODY_MAX_CHARS}`);
-    if (capsRatio(body) > 0.3) problems.push("body uses an excessive proportion of capitals");
-    if ((body.match(/!/g) ?? []).length > 2) warnings.push("body has several exclamation marks");
+  // --- 2. Legal footer ---------------------------------------------------
+  if (!ctx.sender.fromEmail || !isValidSyntax(ctx.sender.fromEmail))
+    problems.push("Sender identity has no valid from-address.");
+  if (!ctx.sender.postalAddress?.trim())
+    problems.push("Sender identity has no postal address (required on commercial mail).");
+  else if (!body.includes(ctx.sender.postalAddress.trim()))
+    problems.push("Body does not carry the sender's postal address.");
+
+  const hasOptOut =
+    /\bunsubscribe\b/i.test(body) ||
+    /\b(reply|let me know)\b[^.]{0,60}\b(stop|no thanks|not interested)\b/i.test(body) ||
+    (ctx.sender.unsubscribeUrl ? body.includes(ctx.sender.unsubscribeUrl) : false);
+  if (!hasOptOut) problems.push("Body gives the recipient no way to opt out.");
+
+  // --- 3. Fabrication ----------------------------------------------------
+  // Verification runs first, and the `verified` flag on the incoming records
+  // is ignored. It is set by whatever composed the message — i.e. the model
+  // would be grading its own homework, and a model that invents a statistic
+  // will happily also mark it as sourced.
+  const verdict = verifyProvenance(draft.provenance, ctx.corpus);
+  for (const record of verdict.unverified) {
+    problems.push(`Claim not traceable to any crawled page: ${JSON.stringify(trim(record.claim))}.`);
   }
 
-  // --- Unrendered templates ---
-  for (const p of PLACEHOLDER_PATTERNS) {
-    if (p.test(subject) || p.test(body)) {
-      problems.push(`unrendered template placeholder matching ${p} survived into the message`);
-      break;
-    }
-  }
-
-  // --- Forbidden / unsafe claims ---
-  for (const { pattern, problem } of FORBIDDEN_PATTERNS) {
-    if (pattern.test(subject) || pattern.test(body)) problems.push(problem);
-  }
-
-  // --- Spam triggers ---
-  const lowered = `${subject}\n${body}`.toLowerCase();
-  const triggers = SPAM_TRIGGER_WORDS.filter((w) => lowered.includes(w));
-  if (triggers.length > 0) problems.push(`contains spam-trigger phrases: ${triggers.join(", ")}`);
-
-  // --- Opt-out ---
-  if (!hasOptOut(body)) {
-    problems.push("body has no opt-out instruction (required on commercial mail)");
-  }
-
-  // --- Grounding ---
-  const citations = verifyCitations(draft, offering);
-  if (!citations.ok) {
-    problems.push(
-      `cites claims not found in the extracted offering: ${citations.unknown.slice(0, 3).join("; ")}`,
+  for (const { pattern, why } of UNSUPPORTABLE_PATTERNS) {
+    const hit = copy.match(pattern);
+    if (!hit) continue;
+    const supportedByProvenance = verdict.records.some(
+      (record) => record.verified && normaliseClaim(record.claim).includes(normaliseClaim(hit[0])),
     );
+    if (supportedByProvenance) continue;
+    problems.push(`Unsupported ${why}: ${JSON.stringify(hit[0])}.`);
   }
 
-  // --- Link discipline ---
-  const links = body.match(/https?:\/\/[^\s)>\]]+/g) ?? [];
-  if (links.length > 3) warnings.push(`${links.length} links; more than ~2 hurts deliverability`);
+  // Proper nouns the copy invented. Checked against the corpus rather than a
+  // list, because the only names it may use are ones somebody published.
+  for (const name of inventedNames(copy, ctx)) {
+    warnings.push(`Mentions "${name}", which was not found on any crawled page.`);
+  }
+
+  // --- 4. Specificity ----------------------------------------------------
+  if (ctx.requireEvidenceUse !== false && !ctx.isReply) {
+    const used = ctx.evidence.some((e) => quoteIsUsed(e.quote, copy));
+    const citesProspect = draft.provenance.some((r) => r.kind === "prospect" && r.verified);
+    if (!used && !citesProspect)
+      problems.push("Body does not use anything specific found on the prospect's site.");
+  }
+
+  // --- 5. Spam hygiene ---------------------------------------------------
+  for (const { pattern, why } of SPAM_PATTERNS) {
+    const hit = copy.match(pattern);
+    if (hit) warnings.push(`${why}: ${JSON.stringify(hit[0])}.`);
+  }
+
+  const questions = (copy.match(/\?/g) ?? []).length;
+  if (!ctx.isReply && questions === 0) warnings.push("No question, so no easy way to reply.");
+  if (questions > 3) warnings.push(`${questions} questions in one email is an interrogation.`);
+
+  const links = copy.match(/https?:\/\/\S+/g) ?? [];
+  if (links.length > 2) warnings.push(`${links.length} links will trip spam filters.`);
 
   return { ok: problems.length === 0, problems, warnings };
 }
 
-/** Appends the compliance footer if the body does not already carry one. */
-export function withFooter(body: string, footer: string): string {
-  if (hasOptOut(body)) return body;
-  return `${body.trimEnd()}\n\n—\n${footer}`;
+/**
+ * True when the copy visibly draws on a specific quote.
+ *
+ * Not substring matching: good copy paraphrases rather than pasting. We look
+ * for a run of distinctive words from the quote reappearing in the body.
+ */
+export function quoteIsUsed(quote: string, body: string): boolean {
+  const STOP = new Set([
+    "the", "and", "for", "that", "with", "you", "your", "our", "are", "was",
+    "this", "from", "have", "has", "they", "their", "but", "not", "can", "all",
+    "its", "his", "her", "who", "what", "when", "will", "how", "why", "any",
+    "out", "get", "more", "than", "then", "into", "over", "also", "been",
+  ]);
+  const words = (text: string) =>
+    text.toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter((w) => w.length > 3 && !STOP.has(w));
+
+  const q = words(quote);
+  if (q.length === 0) return false;
+  const b = new Set(words(body));
+  const shared = new Set(q.filter((w) => b.has(w)));
+  // Two distinctive shared words, or a third of the quote's content words.
+  return shared.size >= 2 || shared.size / new Set(q).size >= 0.34;
+}
+
+/** Capitalised multi-word names in the copy that nothing crawled mentions. */
+function inventedNames(copy: string, ctx: DraftContext): string[] {
+  const allowed = new Set(ctx.allowedNames.map((n) => n.toLowerCase()));
+  const corpusText = [...ctx.corpus.values()].join("\n").toLowerCase();
+  const found = new Set<string>();
+
+  // Skip the first word of each sentence: capitalisation there is grammar.
+  const candidates = copy.match(/(?<![.!?]\s)(?<!^)\b[A-Z][a-zA-Z]{2,}(?:\s+[A-Z][a-zA-Z]{2,})?\b/gm) ?? [];
+  for (const raw of candidates) {
+    const name = raw.trim();
+    const lower = name.toLowerCase();
+    if (allowed.has(lower)) continue;
+    if (COMMON_CAPITALISED.has(lower)) continue;
+    if (corpusText.includes(lower)) continue;
+    found.add(name);
+  }
+  return [...found];
+}
+
+const COMMON_CAPITALISED = new Set([
+  "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+  "january", "february", "march", "april", "may", "june", "july", "august",
+  "september", "october", "november", "december", "best", "thanks", "regards",
+  "hi", "hello", "hey", "unsubscribe", "ps", "api", "ceo", "cto", "cfo", "vp",
+  "eu", "us", "uk", "gdpr", "soc", "iso", "saas", "the", "and", "but",
+]);
+
+/** Loose enough that re-punctuation does not break the match. */
+function normaliseClaim(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9%]+/g, " ").trim();
+}
+
+function trim(text: string, max = 80): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }

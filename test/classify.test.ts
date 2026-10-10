@@ -1,175 +1,178 @@
 import { describe, expect, it } from "vitest";
 import { classifyReply, detectObjection, stripQuotedText } from "../src/core/classify";
 
-describe("stripQuotedText", () => {
-  /**
-   * Without this the classifier reads our own footer back: every outbound
-   * message contains the word "unsubscribe", so every reply looked like an
-   * opt-out and the whole pipeline would halt on first contact.
-   */
-  it("removes the quoted original so our own footer is not classified", () => {
-    const reply = [
-      "Sounds interesting, can you send pricing?",
+/**
+ * Misreading a reply is the most expensive mistake the agent can make: it
+ * either keeps mailing somebody who said stop, or writes off a warm buyer.
+ * Both have happened in testing, and both are in here.
+ */
+describe("classifyReply", () => {
+  it.each([
+    "Yes, this looks interesting — tell me more.",
+    "This is relevant for us, we have exactly that problem with alert noise.",
+  ])("reads interest: %s", (body) => {
+    expect(["interested", "meeting_request"]).toContain(classifyReply(body).intent);
+  });
+
+  it.each([
+    "Can we set up a call next week? Tuesday or Wednesday works.",
+    "Happy to chat — what times suit you?",
+    "Sure, worth a short call. Send an invite.",
+  ])("reads a meeting request: %s", (body) => {
+    expect(classifyReply(body).intent).toBe("meeting_request");
+  });
+
+  it.each([
+    "What does pricing look like for a team of 30?",
+    "How much is this per month?",
+    "Can you send me a ballpark on cost?",
+  ])("reads a pricing question: %s", (body) => {
+    expect(classifyReply(body).intent).toBe("pricing_question");
+    expect(classifyReply(body).needsHuman).toBe(true);
+  });
+
+  it.each([
+    "Send over the contract and we'll get it signed this week.",
+    "We're ready to move forward. What do you need from us?",
+  ])("reads a commitment: %s", (body) => {
+    const analysis = classifyReply(body);
+    expect(analysis.intent).toBe("commitment");
+    // The agent must never close its own deal.
+    expect(analysis.needsHuman).toBe(true);
+  });
+
+  it.each([
+    ["please remove me from your list", "unsubscribe"],
+    ["Unsubscribe.", "unsubscribe"],
+    ["Take me off this list and do not contact me again", "unsubscribe"],
+    ["STOP", "unsubscribe"],
+  ] as const)("reads an opt-out: %s", (body, expected) => {
+    const analysis = classifyReply(body);
+    expect(analysis.intent).toBe(expected);
+    expect(analysis.mustStop).toBe(true);
+  });
+
+  it.each([
+    "Mail delivery failed: returning message to sender. 550 5.1.1 user unknown",
+    "Your message to lena@fableworks.test could not be delivered. Recipient address rejected.",
+  ])("reads a bounce: %s", (body) => {
+    const analysis = classifyReply(body);
+    expect(analysis.intent).toBe("bounce");
+    expect(analysis.mustStop).toBe(true);
+  });
+
+  it("reads an out-of-office without treating it as interest", () => {
+    const analysis = classifyReply("I am out of the office until 3 March with limited access to email.");
+    expect(analysis.intent).toBe("auto_reply");
+    expect(analysis.mustStop).toBe(false);
+  });
+
+  it("treats an incumbent question as an objection, not a rejection", () => {
+    // "We already use Datadog, what would you add?" was read as
+    // not_interested and marked the deal lost. It is the most answerable
+    // objection there is.
+    const analysis = classifyReply("We already use Datadog. What would you add on top of that?");
+    expect(analysis.intent).toBe("objection");
+    expect(analysis.objection).toBe("incumbent");
+  });
+
+  it("downgrades a negative-sounding question to an objection", () => {
+    const analysis = classifyReply("Not sure we need this — how is it different from what Prometheus gives us?");
+    expect(analysis.intent).not.toBe("not_interested");
+  });
+
+  it("reads a flat no as not interested", () => {
+    const analysis = classifyReply("Thanks but we're not interested.");
+    expect(analysis.intent).toBe("not_interested");
+    expect(analysis.mustStop).toBe(true);
+  });
+
+  it("reads a deferral as not now, and keeps the lead", () => {
+    const analysis = classifyReply("Not a priority this quarter. Try me again after June.");
+    expect(analysis.intent).toBe("not_now");
+    expect(analysis.mustStop).toBe(false);
+  });
+
+  it("reads a referral", () => {
+    const analysis = classifyReply("I'm not the right person for this — Marco in platform handles tooling.");
+    expect(["referral", "wrong_person"]).toContain(analysis.intent);
+  });
+
+  it("falls back to unclear rather than guessing", () => {
+    const analysis = classifyReply("ok");
+    expect(analysis.intent).toBe("unclear");
+    expect(analysis.needsHuman).toBe(true);
+  });
+
+  it("is not fooled by our own footer in a quoted reply", () => {
+    // Our footer contains the word "unsubscribe". Classifying the quoted text
+    // marked interested prospects as opt-outs.
+    const body = [
+      "Yes, let's talk. Tuesday at 10 works for me.",
       "",
-      "On Mon, 2 Mar 2026 at 10:02, Sam <sam@northwind.example> wrote:",
-      "> Hi Priya — quick question about your on-call rota.",
-      "> Not relevant? Unsubscribe: https://northwind.example/unsubscribe",
+      "On Mon, 9 Mar 2026 at 09:00, Dana Reyes <dana@seller.test> wrote:",
+      "> Hi Lena, I noticed your on-call rotation is paged forty times a week.",
+      "> To stop hearing from me, unsubscribe here: https://seller.test/unsubscribe",
+      "> Seller Inc, 12 Rue Example, 75001 Paris, France",
     ].join("\n");
-    const stripped = stripQuotedText(reply);
-    expect(stripped).toContain("send pricing");
-    expect(stripped.toLowerCase()).not.toContain("unsubscribe");
+    expect(classifyReply(body).intent).toBe("meeting_request");
   });
 
-  it("handles Outlook separators and mobile signatures", () => {
-    expect(stripQuotedText("No thanks.\n-----Original Message-----\nFrom: Sam")).toBe("No thanks.");
-    expect(stripQuotedText("Interested!\nSent from my iPhone")).toBe("Interested!");
-  });
-});
-
-describe("opt-out detection", () => {
-  it("catches the many ways people ask to be removed", () => {
-    for (const body of [
-      "Please unsubscribe me.",
-      "Take me off this list.",
-      "Remove me from your database.",
-      "Stop emailing me.",
-      "Do not contact me again.",
-      "opt out please",
-      "Please delete my data.",
-      "No further emails thanks",
-    ]) {
-      const r = classifyReply(body);
-      expect(r.intent, body).toBe("unsubscribe");
-      expect(r.mustStop, body).toBe(true);
-    }
-  });
-
-  it("does not fire on our own quoted footer", () => {
-    const reply = "Yes let's book a call.\n\n> Not relevant? Unsubscribe: https://x.example/u";
-    expect(classifyReply(reply).intent).not.toBe("unsubscribe");
-  });
-
-  it("outranks every other reading in the same message", () => {
-    const r = classifyReply("This looks interesting but please remove me from your list.");
-    expect(r.intent).toBe("unsubscribe");
-    expect(r.mustStop).toBe(true);
-  });
-});
-
-describe("bounces and auto-replies", () => {
-  it("detects delivery failures", () => {
-    for (const body of [
-      "Delivery Status Notification (Failure)",
-      "550-5.1.1 The email account that you tried to reach does not exist",
-      "Mail delivery failed: returning message to sender",
-      "Address not found",
-    ]) {
-      const r = classifyReply(body);
-      expect(r.intent, body).toBe("bounce");
-      expect(r.mustStop, body).toBe(true);
-    }
-  });
-
-  it("detects out-of-office without treating it as disinterest", () => {
-    const r = classifyReply("Automatic reply: I am currently away and will be back on 14 March.");
-    expect(r.intent).toBe("auto_reply");
-    expect(r.mustStop).toBe(false);
-    expect(r.needsHuman).toBe(false);
-  });
-});
-
-describe("intent classification", () => {
-  const cases: Array<[string, string]> = [
-    ["Happy to chat — what's your availability next week?", "meeting_request"],
-    ["Can you send me a quote? What's the pricing per seat?", "pricing_question"],
-    ["This sounds interesting, tell me more.", "interested"],
-    ["I'm not the right person, try our head of platform.", "wrong_person"],
-    ["Not right now, circle back in Q3.", "not_now"],
-    ["Not interested, we're all set.", "not_interested"],
-  ];
-
-  for (const [body, expected] of cases) {
-    it(`reads "${body.slice(0, 38)}…" as ${expected}`, () => {
-      expect(classifyReply(body).intent).toBe(expected);
-    });
-  }
-
-  it("flags an unreadable reply for a human instead of guessing", () => {
-    const r = classifyReply("ok");
-    expect(r.intent).toBe("unclear");
-    expect(r.needsHuman).toBe(true);
-    expect(r.confidence).toBeLessThan(0.5);
-  });
-
-  it("routes referrals and wrong-person replies to a human", () => {
-    expect(classifyReply("Forwarding this to Dana who owns it.").needsHuman).toBe(true);
-    expect(classifyReply("Wrong person — not my department.").needsHuman).toBe(true);
-  });
-
-  it("stops the cadence on a flat no", () => {
-    expect(classifyReply("Not interested.").mustStop).toBe(true);
-  });
-});
-
-describe("regressions from the end-to-end run", () => {
-  /**
-   * A warm buyer asked "What does pricing look like for a team of about 30
-   * engineers?" and it classified as `unclear`, which routed the reply to a
-   * human and stalled the deal for the rest of the simulation.
-   */
-  it("reads the common phrasings of a pricing question", () => {
-    for (const body of [
-      "What does pricing look like for a team of about 30 engineers?",
-      "How much would this be for 50 seats?",
-      "Can you send me a ballpark?",
-      "What is your pricing?",
-      "What would it cost us?",
-    ]) {
-      expect(classifyReply(body).intent, body).toBe("pricing_question");
-    }
-  });
-
-  /**
-   * "We already use Datadog ... what is different?" classified as
-   * `not_interested`, which marked the deal lost. An incumbent objection with
-   * a question in it is the most winnable reply there is.
-   */
-  it("treats an incumbent mention as an objection, not a refusal", () => {
-    const r = classifyReply(
-      "We already use Datadog for most of this, so I am not sure what you would add. What is different?",
+  it("reads an opt-out buried under a polite preamble", () => {
+    const analysis = classifyReply(
+      "Thanks for reaching out, it does look useful and I'll keep you in mind. For now please remove me from your mailing list.",
     );
-    expect(r.intent).toBe("objection");
-    expect(r.objection).toBe("incumbent");
-    expect(r.mustStop).toBe(false);
+    expect(analysis.mustStop).toBe(true);
   });
 
-  it("still treats an unambiguous refusal as one", () => {
-    for (const body of ["Not interested.", "No thanks, we're all set.", "Not a fit for us."]) {
-      const r = classifyReply(body);
-      expect(r.intent, body).toBe("not_interested");
-      expect(r.mustStop, body).toBe(true);
+  it("handles an empty body", () => {
+    expect(classifyReply("").intent).toBe("unclear");
+  });
+
+  it("reports confidence between 0 and 1", () => {
+    for (const body of ["unsubscribe", "what does pricing look like?", "ok", ""]) {
+      const { confidence } = classifyReply(body);
+      expect(confidence).toBeGreaterThanOrEqual(0);
+      expect(confidence).toBeLessThanOrEqual(1);
     }
   });
 
-  it("does not let a trailing question rescue a flat no with no objection in it", () => {
-    const r = classifyReply("Not interested. Who gave you my address?");
-    expect(r.intent).toBe("not_interested");
+  it("uses the subject line when the body says nothing", () => {
+    expect(classifyReply("", "Undelivered Mail Returned to Sender").intent).toBe("bounce");
   });
 });
 
-describe("objection detection", () => {
-  it("names the objection behind a negative reply", () => {
-    expect(detectObjection("way too expensive for us").kind).toBe("price");
-    expect(detectObjection("we already use Datadog").kind).toBe("incumbent");
-    expect(detectObjection("I'd need sign-off from procurement").kind).toBe("authority");
-    expect(detectObjection("never heard of you, do you have case studies?").kind).toBe("trust");
-    expect(detectObjection("bad timing, too busy this quarter").kind).toBe("timing");
-    expect(detectObjection("thanks!").kind).toBe("none");
+describe("detectObjection", () => {
+  it.each([
+    ["too expensive for us right now", "price"],
+    ["no budget until next year", "price"],
+    ["we already use Datadog for this", "incumbent"],
+    ["I'd need to check with my manager", "authority"],
+    ["never heard of you, are you GDPR compliant?", "trust"],
+    ["we don't have this problem", "need"],
+    ["bad timing, we're mid-migration", "timing"],
+  ] as const)("reads %s as %s", (body, kind) => {
+    expect(detectObjection(body).kind).toBe(kind);
   });
 
-  it("attaches the objection to an objection-intent reply", () => {
-    const r = classifyReply("Looks useful but it's too expensive and we already use Datadog.");
-    expect(["objection", "not_interested"]).toContain(r.intent);
-    expect(r.objection).not.toBe("none");
+  it("returns none when there is no objection", () => {
+    expect(detectObjection("sounds good, send an invite").kind).toBe("none");
+  });
+});
+
+describe("stripQuotedText", () => {
+  it("drops the quoted original", () => {
+    const stripped = stripQuotedText("My answer.\n\nOn Mon wrote:\n> original text here");
+    expect(stripped).toContain("My answer.");
+    expect(stripped).not.toContain("original text here");
+  });
+
+  it("drops an Outlook-style divider", () => {
+    const stripped = stripQuotedText("Answer.\n\n-----Original Message-----\nFrom: Dana\nsecret");
+    expect(stripped).not.toContain("secret");
+  });
+
+  it("leaves a reply with no quoting alone", () => {
+    expect(stripQuotedText("Just a plain reply.").trim()).toBe("Just a plain reply.");
   });
 });

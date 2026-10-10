@@ -1,141 +1,154 @@
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_SEQUENCE, ROLE_INBOX_SEQUENCE, addBusinessDays, advance, initialEnrollment,
-  isBusinessDay, isDue, isPaused, isTerminal, nextDueAt,
+  addBusinessDays, advance, DEFAULT_SEQUENCE, initialEnrollment, isBusinessDay,
+  isDue, nextDueAt, ROLE_INBOX_SEQUENCE,
 } from "../src/core/sequence";
-import type { EnrollmentSnapshot } from "../src/core/types";
+import type { EnrollmentSnapshot, EnrollmentState, ReplyIntent } from "../src/core/types";
 
-const MON = new Date("2026-03-02T10:00:00Z");
-const FRI = new Date("2026-03-06T10:00:00Z");
+const MON = new Date("2026-03-09T09:00:00Z");
+const FRI = new Date("2026-03-13T09:00:00Z");
+const SAT = new Date("2026-03-14T09:00:00Z");
 
-describe("business days", () => {
-  it("knows weekends", () => {
-    expect(isBusinessDay(MON)).toBe(true);
-    expect(isBusinessDay(new Date("2026-03-07T10:00:00Z"))).toBe(false);
-    expect(isBusinessDay(new Date("2026-03-08T10:00:00Z"))).toBe(false);
-  });
-
-  it("skips the weekend when adding days", () => {
-    expect(addBusinessDays(FRI, 1).toISOString()).toContain("2026-03-09"); // Monday
-    expect(addBusinessDays(FRI, 3).toISOString()).toContain("2026-03-11");
+describe("addBusinessDays", () => {
+  it("skips the weekend", () => {
+    expect(addBusinessDays(FRI, 1).toISOString()).toBe("2026-03-16T09:00:00.000Z");
+    expect(addBusinessDays(FRI, 3).toISOString()).toBe("2026-03-18T09:00:00.000Z");
   });
 
   it("moves a zero-day delay off a weekend", () => {
-    // A step due "immediately" on a Saturday must not go out on Saturday.
-    const sat = new Date("2026-03-07T10:00:00Z");
-    expect(isBusinessDay(addBusinessDays(sat, 0))).toBe(true);
+    // A step due "immediately" on a Saturday must not be sent on Saturday.
+    expect(isBusinessDay(addBusinessDays(SAT, 0))).toBe(true);
   });
 
   it("preserves the time of day", () => {
-    expect(addBusinessDays(MON, 2).getUTCHours()).toBe(10);
+    expect(addBusinessDays(MON, 2).toISOString()).toBe("2026-03-11T09:00:00.000Z");
+  });
+
+  it("treats a negative delay as zero", () => {
+    expect(addBusinessDays(MON, -5).toISOString()).toBe(MON.toISOString());
   });
 });
 
-describe("scheduling", () => {
-  it("makes the first touch due immediately on enrollment", () => {
+describe("nextDueAt", () => {
+  it("schedules the first touch immediately", () => {
     const due = nextDueAt(initialEnrollment(), DEFAULT_SEQUENCE, MON);
-    expect(due).not.toBeNull();
-    expect(isDue(initialEnrollment(), DEFAULT_SEQUENCE, MON, MON)).toBe(true);
+    expect(due?.toISOString()).toBe(MON.toISOString());
   });
 
-  it("spaces later steps by their configured business-day delay", () => {
-    const after1: EnrollmentSnapshot = { state: "active", nextStepIndex: 1, lastSentAt: MON };
-    const due = nextDueAt(after1, DEFAULT_SEQUENCE, MON)!;
-    expect(due.toISOString()).toContain("2026-03-05"); // Mon + 3 business days
-    expect(isDue(after1, DEFAULT_SEQUENCE, MON, MON)).toBe(false);
+  it("schedules later steps from the last send", () => {
+    const enrollment: EnrollmentSnapshot = { state: "active", nextStepIndex: 1, lastSentAt: MON };
+    expect(nextDueAt(enrollment, DEFAULT_SEQUENCE, MON)?.toISOString()).toBe("2026-03-12T09:00:00.000Z");
   });
 
-  /**
-   * The rule that matters most: a prospect who replied must never receive
-   * another cadence step. The conversation engine owns them from then on.
-   */
-  it("never schedules another cadence step once the prospect replied", () => {
+  it("never schedules anything for a prospect who replied", () => {
     const replied: EnrollmentSnapshot = { state: "replied", nextStepIndex: 1, lastSentAt: MON, repliedAt: MON };
     expect(nextDueAt(replied, DEFAULT_SEQUENCE, MON)).toBeNull();
-    expect(isDue(replied, DEFAULT_SEQUENCE, MON, new Date("2027-01-01"))).toBe(false);
+    expect(isDue(replied, DEFAULT_SEQUENCE, MON, new Date("2027-01-01T09:00:00Z"))).toBe(false);
   });
 
-  it("schedules nothing for terminal states", () => {
-    for (const state of ["won", "lost", "unsubscribed", "bounced", "exhausted"] as const) {
-      expect(nextDueAt({ state, nextStepIndex: 1 }, DEFAULT_SEQUENCE, MON), state).toBeNull();
-    }
+  it.each<EnrollmentState>(["won", "lost", "unsubscribed", "bounced", "exhausted", "meeting"])(
+    "never schedules anything in state %s",
+    (state) => {
+      expect(nextDueAt({ state, nextStepIndex: 1, lastSentAt: MON }, DEFAULT_SEQUENCE, MON)).toBeNull();
+    },
+  );
+
+  it("returns null when the sequence runs out", () => {
+    const enrollment: EnrollmentSnapshot = { state: "active", nextStepIndex: 99, lastSentAt: MON };
+    expect(nextDueAt(enrollment, DEFAULT_SEQUENCE, MON)).toBeNull();
   });
 
-  it("schedules nothing past the end of the cadence", () => {
-    const done: EnrollmentSnapshot = { state: "active", nextStepIndex: 99, lastSentAt: MON };
-    expect(nextDueAt(done, DEFAULT_SEQUENCE, MON)).toBeNull();
-  });
-
-  it("gives role inboxes a shorter cadence than named contacts", () => {
+  it("gives a shared inbox a shorter cadence than a person", () => {
     expect(ROLE_INBOX_SEQUENCE.steps.length).toBeLessThan(DEFAULT_SEQUENCE.steps.length);
   });
 });
 
 describe("advance", () => {
-  it("walks the cadence and finishes as exhausted", () => {
+  const sent = (e: EnrollmentSnapshot) => advance(e, { type: "sent", at: MON }, DEFAULT_SEQUENCE);
+
+  it("walks the sequence and then exhausts it", () => {
     let e = initialEnrollment();
     for (let i = 0; i < DEFAULT_SEQUENCE.steps.length; i++) {
-      e = advance(e, { type: "sent", at: MON }, DEFAULT_SEQUENCE);
+      e = sent(e);
+      expect(e.nextStepIndex).toBe(i + 1);
     }
     expect(e.state).toBe("exhausted");
-    expect(e.nextStepIndex).toBe(DEFAULT_SEQUENCE.steps.length);
-    expect(isTerminal(e.state)).toBe(true);
   });
 
-  it("pauses on a reply", () => {
-    const e = advance(initialEnrollment(), { type: "replied", at: MON, intent: "interested" }, DEFAULT_SEQUENCE);
-    expect(e.state).toBe("replied");
-    expect(isPaused(e.state)).toBe(true);
+  it("pauses on a reply, from any live state", () => {
+    const replied = advance(sent(initialEnrollment()), { type: "replied", at: FRI, intent: "interested" }, DEFAULT_SEQUENCE);
+    expect(replied.state).toBe("replied");
+    expect(replied.repliedAt).toEqual(FRI);
   });
 
-  it("treats an unsubscribe reply as an opt-out, not a pause", () => {
-    const e = advance(initialEnrollment(), { type: "replied", at: MON, intent: "unsubscribe" }, DEFAULT_SEQUENCE);
-    expect(e.state).toBe("unsubscribed");
+  it("reopens an exhausted sequence when they finally reply", () => {
+    // "Exhausted" means we stopped chasing, not that the door is closed.
+    const exhausted: EnrollmentSnapshot = { state: "exhausted", nextStepIndex: 4, lastSentAt: MON };
+    expect(advance(exhausted, { type: "replied", at: FRI, intent: "interested" }, DEFAULT_SEQUENCE).state).toBe("replied");
   });
 
-  it("lets an unsubscribe override every other state, including won", () => {
-    for (const state of ["pending", "active", "replied", "meeting", "won", "exhausted"] as const) {
-      const e = advance({ state, nextStepIndex: 1 }, { type: "unsubscribed", at: MON }, DEFAULT_SEQUENCE);
-      expect(e.state, state).toBe("unsubscribed");
-    }
-  });
-
-  it("lets a bounce override every other state", () => {
-    for (const state of ["pending", "active", "replied", "won"] as const) {
-      const e = advance({ state, nextStepIndex: 0 }, { type: "bounced", at: MON }, DEFAULT_SEQUENCE);
-      expect(e.state, state).toBe("bounced");
-    }
-  });
-
-  it("does not resurrect a closed enrollment", () => {
-    const won: EnrollmentSnapshot = { state: "won", nextStepIndex: 2 };
-    expect(advance(won, { type: "sent", at: MON }, DEFAULT_SEQUENCE).state).toBe("won");
-    expect(advance(won, { type: "replied", at: MON, intent: "interested" }, DEFAULT_SEQUENCE).state).toBe("won");
-  });
-
-  /**
-   * A human (or the conversation engine) replying to an engaged prospect must
-   * not silently consume a cadence step — otherwise answering two questions
-   * burns the rest of the sequence.
-   */
-  it("records a send during a paused state without advancing the cadence", () => {
-    const replied: EnrollmentSnapshot = { state: "replied", nextStepIndex: 1, repliedAt: MON };
+  it("records a conversational send without advancing the cadence", () => {
+    const replied: EnrollmentSnapshot = { state: "replied", nextStepIndex: 2, repliedAt: MON };
     const after = advance(replied, { type: "sent", at: FRI }, DEFAULT_SEQUENCE);
     expect(after.state).toBe("replied");
-    expect(after.nextStepIndex).toBe(1);
+    expect(after.nextStepIndex).toBe(2);
     expect(after.lastSentAt).toEqual(FRI);
   });
 
-  it("moves through meeting to won", () => {
-    let e = advance(initialEnrollment(), { type: "replied", at: MON, intent: "meeting_request" }, DEFAULT_SEQUENCE);
-    e = advance(e, { type: "meeting_booked", at: MON }, DEFAULT_SEQUENCE);
-    expect(e.state).toBe("meeting");
-    e = advance(e, { type: "won", at: FRI }, DEFAULT_SEQUENCE);
-    expect(e.state).toBe("won");
+  it.each<EnrollmentState>(["pending", "active", "replied", "meeting", "won", "lost", "exhausted"])(
+    "lets an unsubscribe win from state %s",
+    (state) => {
+      const after = advance({ state, nextStepIndex: 1 }, { type: "unsubscribed", at: FRI }, DEFAULT_SEQUENCE);
+      expect(after.state).toBe("unsubscribed");
+    },
+  );
+
+  it.each<EnrollmentState>(["pending", "active", "replied", "meeting", "won", "exhausted"])(
+    "lets a bounce win from state %s",
+    (state) => {
+      expect(advance({ state, nextStepIndex: 1 }, { type: "bounced", at: FRI }, DEFAULT_SEQUENCE).state).toBe("bounced");
+    },
+  );
+
+  it("treats an unsubscribe reply as an unsubscribe", () => {
+    const after = advance(initialEnrollment(), { type: "replied", at: FRI, intent: "unsubscribe" }, DEFAULT_SEQUENCE);
+    expect(after.state).toBe("unsubscribed");
   });
 
-  it("accepts a reply after the cadence is exhausted", () => {
-    const e = advance({ state: "exhausted", nextStepIndex: 4 }, { type: "replied", at: MON, intent: "interested" }, DEFAULT_SEQUENCE);
-    expect(e.state).toBe("replied");
+  it("holds terminal states against ordinary events", () => {
+    // A won deal dragged back to an open stage by a stray reply re-closed
+    // itself on every tick of the orchestrator.
+    const won: EnrollmentSnapshot = { state: "won", nextStepIndex: 2, lastSentAt: MON };
+    for (const event of [
+      { type: "sent" as const, at: FRI },
+      { type: "replied" as const, at: FRI, intent: "interested" as ReplyIntent },
+      { type: "meeting_booked" as const, at: FRI },
+      { type: "lost" as const, at: FRI },
+    ]) {
+      expect(advance(won, event, DEFAULT_SEQUENCE)).toEqual(won);
+    }
+  });
+
+  it("is total: every state and event pair resolves", () => {
+    const states: EnrollmentState[] = [
+      "pending", "active", "replied", "meeting", "won", "lost",
+      "unsubscribed", "bounced", "exhausted",
+    ];
+    const events = [
+      { type: "sent" as const, at: FRI },
+      { type: "replied" as const, at: FRI, intent: "interested" as ReplyIntent },
+      { type: "meeting_booked" as const, at: FRI },
+      { type: "won" as const, at: FRI },
+      { type: "lost" as const, at: FRI },
+      { type: "bounced" as const, at: FRI },
+      { type: "unsubscribed" as const, at: FRI },
+    ];
+    for (const state of states) {
+      for (const event of events) {
+        const after = advance({ state, nextStepIndex: 1 }, event, DEFAULT_SEQUENCE);
+        expect(states).toContain(after.state);
+        expect(after.nextStepIndex).toBeGreaterThanOrEqual(0);
+      }
+    }
   });
 });

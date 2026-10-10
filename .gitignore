@@ -12,3 +12,7 @@ src/generated/
 *.tsbuildinfo
 .vercel
 /outbox/
+/inbox/
+/data/
+*.db
+*.db-journal

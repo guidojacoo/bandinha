@@ -1,31 +1,26 @@
 {
-  "name": "rainmaker",
+  "name": "mercurio",
   "version": "1.0.0",
   "private": true,
-  "description": "Rainmaker — an autonomous B2B sales agent. Give it one URL; it learns what you sell, finds who buys it, writes to them, handles the replies, and works the pipeline.",
-  "engines": {
-    "node": ">=20"
-  },
+  "description": "Mercurio — a free, open-data autonomous sales agent. One URL in, a worked pipeline out. No paid APIs anywhere.",
+  "engines": { "node": ">=20" },
   "scripts": {
-    "dev": "next dev --port 3000",
+    "dev": "next dev",
     "build": "prisma generate && next build",
-    "start": "next start --port 3000",
+    "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest",
     "postinstall": "prisma generate",
-    "generate": "prisma generate",
-    "migrate": "prisma migrate dev",
-    "migrate:deploy": "prisma migrate deploy",
-    "studio": "prisma studio",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio",
+    "setup": "tsx src/cli/setup.ts",
     "sell": "tsx src/cli/sell.ts",
     "agent": "tsx src/cli/agent.ts",
-    "inbox": "tsx src/cli/inbox.ts",
-    "fixtures": "tsx fixtures/server.ts",
-    "demo": "tsx src/cli/demo.ts"
+    "demo": "tsx src/cli/demo.ts",
+    "doctor": "tsx src/cli/doctor.ts",
+    "fixtures": "tsx fixtures/server.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.133.0",
     "@prisma/client": "^5.22.0",
     "bcryptjs": "^2.4.3",
     "cheerio": "^1.0.0",
@@ -40,7 +35,7 @@
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
-    "@types/mailparser": "^3.9.0",
+    "@types/mailparser": "^3.4.6",
     "@types/node": "^22.9.0",
     "@types/nodemailer": "^6.4.17",
     "@types/react": "^18.3.12",
