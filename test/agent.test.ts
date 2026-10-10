@@ -381,3 +381,43 @@ describe("parseEml", () => {
     expect(parseEml(`${headers}\r\n\r\n`)?.body).toBe("");
   });
 });
+
+describe("provenance records the source sentence, not the rewrite", () => {
+  const input = {
+    offering: offering(),
+    profile: lead(),
+    contact: lead().publicContacts[0]!,
+    step: { index: 0, delayDays: 0, intent: "first_touch" as const },
+    sender,
+  };
+
+  it("cites the prospect's own words verbatim", () => {
+    // observationFrom turns "We run on Kubernetes" into "You run on
+    // Kubernetes" — correct in an email, unverifiable as a claim. Recording
+    // the rewrite dropped token overlap below the provenance threshold and
+    // blocked an otherwise perfect message.
+    const message = templateDraft(input);
+    const cited = message.provenance.find((p) => p.kind === "prospect");
+    expect(cited?.claim).toBe(input.profile.evidence[0]!.quote);
+  });
+
+  it("still passes the validator when the quote starts with 'We'", () => {
+    const stacky = lead({
+      evidence: [{
+        signal: "kubernetes",
+        quote: "We run on Kubernetes, OpenTelemetry and Python across three regions.",
+        source: "https://fableworks.test/engineering",
+      }],
+    });
+    const message = withFooter(templateDraft({ ...input, profile: stacky }), sender);
+    const result = validateDraft(message, {
+      sender,
+      evidence: stacky.evidence,
+      corpus: buildCorpus(input.offering, stacky),
+      allowedNames: ["Northwind", "Fableworks", "Lena", "Dana"],
+    });
+    expect(result.problems).toEqual([]);
+    // The body still addresses them in the second person.
+    expect(message.body).toMatch(/You run on Kubernetes/);
+  });
+});

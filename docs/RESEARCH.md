@@ -108,9 +108,9 @@ by a gate in code, not by an instruction in a prompt:
 | Generic copy, 0.3% replies | **Evidence-or-silence.** A message cannot be sent unless it quotes something the crawler actually found on *that prospect's own site*. No evidence, no send — the lead is skipped, not spammed. | `core/evidence.ts` |
 | 20–40% bounces burning the domain | **Deliverability pre-flight.** Syntax, role-inbox, disposable-domain and MX checks before a message is ever handed to a transport. | `core/deliverability.ts` |
 | Fabricated claims | **Provenance ledger.** Every factual claim in every message must resolve to a source URL that was actually crawled, and is stored with the message. A claim that does not resolve fails the draft. | `core/provenance.ts` |
-| 2% survival of full autonomy | **Bounded autonomy.** Autonomous research, qualification, drafting and sending; a hard stop at the points where being wrong is expensive — low confidence, long threads, money, signatures. | `agent/converse.ts` |
+| 2% survival of full autonomy | **Bounded autonomy.** Autonomous research, qualification, drafting, sending and objection handling; a hard stop at commitment, pricing and routing, where being wrong costs money or credibility. | `core/classify.ts`, `agent/converse.ts` |
 | $36–65k/yr | **Open-data discovery.** GitHub, Overpass, package registries, directories. The paid provider becomes an optional plugin rather than the foundation. | `infra/sources/` |
-| Free LLM tiers are small | **Token budgeting.** Groq's free tier is ~200K tokens/day on larger models. The agent rations it, prefers small models for classification, and degrades to deterministic templates when exhausted rather than failing. | `infra/llm/budget.ts` |
+| Free LLM tiers are small | **Token budgeting.** Groq's free tier is ~200K tokens/day on larger models. The agent rations it, prefers small models for classification, and degrades to deterministic templates when exhausted rather than failing. | `core/budget.ts` |
 
 ## What this is not
 
@@ -122,6 +122,44 @@ kills senders.
 It is a way for someone with no budget to run a disciplined outbound motion
 that would otherwise cost $36,000 a year, and to do it without the four
 specific mistakes that are currently churning the people who pay that.
+
+## What building it changed
+
+Four things the research above got wrong, or got right for the wrong reason.
+Recorded here rather than quietly corrected, because the plan is only useful
+if the corrections are visible next to it.
+
+**PyPI is not usable, and robots.txt is why.** It was named above as the
+Python counterpart to npm. Its `robots.txt` disallows both the search path and
+the per-project JSON endpoint, and this project's crawler honours robots.txt
+— so there is no permitted search surface. Python-ecosystem prospects come
+from GitHub filtered by language instead. crates.io returns 403 to an
+unauthenticated client and was dropped for the same kind of reason.
+Centralising every outbound request through one fetch path is what surfaced
+this before it shipped rather than after.
+
+**npm turned out to be the strongest proven source, not a footnote.** It was
+listed third, after GitHub and Overpass. It is the one that worked end to end:
+a company publishing a package in your space has already told you that it
+exists, what it works on, and the domain of its website, and `links.homepage`
+on its own domain is the filter that separates a business from a weekend
+project. A live run against an observability ICP returned Pulumi, Langfuse,
+Mastra, Backstage, Pydantic, Spotify and Microsoft.
+
+**"Free LLM tier" is a weaker claim than it looks, and that is fine.** The
+budget gate was designed for a tier that runs out. What the build showed is
+that the deterministic path has to be a *first-class product surface*, not a
+fallback: it derives the offer, the ICP, the copy and the replies, and it has
+to pass exactly the same validator. The honest version of "free" is not "free
+until the quota goes" — it is "the quota changes how good it is, never whether
+it works".
+
+**The evidence gate is harder than stating it.** "Quote something from their
+own site" is one sentence of design and a dozen failure modes in practice:
+cookie banners, navigation menus flattened into a line, noun-pile headings,
+recruiting copy addressed to a candidate, and ordinary prose that a naive
+short-word heuristic reads as a menu. Each of those reached a draft message
+during the build. The gate is now about a third of the code it guards.
 
 ## Sources
 

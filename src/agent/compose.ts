@@ -261,7 +261,14 @@ export function templateDraft(input: ComposeInput): DraftMessage {
   if (quote) {
     const observation = observationFrom(quote);
     paragraphs.push(`${observation} — that is what caught my eye on ${input.profile.domain}.`);
-    provenance.push({ claim: observation, source: quote.source, kind: "prospect", verified: false });
+    // The *source sentence* is recorded, not the rewrite that appears in the
+    // copy. `observationFrom` turns "We run on Kubernetes" into "You run on
+    // Kubernetes", which is correct in an email and unverifiable as a claim —
+    // one pronoun's difference dropped token overlap below the provenance
+    // threshold and blocked an otherwise perfect message. What is being
+    // asserted is their sentence; the ledger should carry their sentence, so
+    // that anyone following the citation reads what we actually read.
+    provenance.push({ claim: quote.quote, source: quote.source, kind: "prospect", verified: false });
   }
 
   const pitch = pitchSentence(input.offering);

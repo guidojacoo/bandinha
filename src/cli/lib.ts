@@ -20,14 +20,72 @@ export function heading(text: string): void {
   console.log(`\n${colour.bold(text)}\n${colour.dim("─".repeat(Math.min(72, text.length + 8)))}`);
 }
 
+/**
+ * Prompting that works for a person and for a pipe.
+ *
+ * Two problems, both found rather than anticipated. Creating a readline
+ * interface per question discards whatever is already buffered on stdin, so
+ * the second answer in `printf 'a\nb\n' | npm run setup` vanished. And a
+ * single interface still drops lines, because readline emits them whether or
+ * not a question is pending — fast piped input arrives before the second
+ * `question()` call and is thrown away.
+ *
+ * So lines are buffered here instead, and end-of-input resolves pending
+ * questions with their defaults rather than hanging. Setup is therefore
+ * scriptable, which matters for a container or a CI run.
+ */
+let io: {
+  rl: ReturnType<typeof createInterface>;
+  lines: string[];
+  waiting: Array<(line: string | null) => void>;
+  closed: boolean;
+} | null = null;
+
+function stdinReader() {
+  if (io) return io;
+  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+  const state = { rl, lines: [] as string[], waiting: [] as Array<(line: string | null) => void>, closed: false };
+
+  rl.on("line", (line) => {
+    const next = state.waiting.shift();
+    if (next) next(line);
+    else state.lines.push(line);
+  });
+  rl.on("close", () => {
+    state.closed = true;
+    while (state.waiting.length > 0) state.waiting.shift()?.(null);
+  });
+
+  io = state;
+  return state;
+}
+
+export function closePrompt(): void {
+  io?.rl.close();
+  io = null;
+}
+
 export async function ask(question: string, fallback = ""): Promise<string> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const answer = (await rl.question(fallback ? `${question} ${colour.dim(`[${fallback}]`)} ` : `${question} `)).trim();
-    return answer || fallback;
-  } finally {
-    rl.close();
+  const state = stdinReader();
+  process.stdout.write(fallback ? `${question} ${colour.dim(`[${fallback}]`)} ` : `${question} `);
+
+  const buffered = state.lines.shift();
+  const line = buffered !== undefined
+    ? buffered
+    : state.closed
+      ? null
+      : await new Promise<string | null>((resolve) => state.waiting.push(resolve));
+
+  if (line === null) {
+    // Input ended. Echo the default so a scripted run is readable.
+    process.stdout.write(`${colour.dim(fallback || "(no answer)")}\n`);
+    return fallback;
   }
+  const answer = line.trim();
+  // `terminal: false` means readline does not echo, so a piped run would
+  // otherwise print a prompt with no visible answer next to it.
+  process.stdout.write(`${answer || colour.dim(fallback)}\n`);
+  return answer || fallback;
 }
 
 export async function confirm(question: string): Promise<boolean> {
@@ -77,6 +135,7 @@ export async function dnsUsable(): Promise<boolean> {
 }
 
 export async function closeDatabase(): Promise<void> {
+  closePrompt();
   await db.$disconnect();
 }
 

@@ -441,7 +441,7 @@ export function inferIcp(offering: Offering, corpusText = ""): Icp {
   ])
     .filter(isPlausibleSignal)
     .filter((signal) => !isSellerBrandWord(signal, offering))
-    .slice(0, 24);
+    .slice(0, 36);
 
   const positiveSignals = uniqueLower([
     ...technologyTerms(offering),
@@ -511,6 +511,16 @@ function signalsFromProse(corpusText: string, offering: Offering): string[] {
           counts.set(phrase, (counts.get(phrase) ?? 0) + 1);
         }
       }
+      // Distinctive single words too, but only long ones and only from a
+      // problem sentence. "uptime" and "spreadsheet" are exactly what a
+      // prospect with this problem writes; the six-character floor is what
+      // keeps "error" and "budget" out, which would match a sentence about
+      // marketing budgets and present it as proof we understood them.
+      for (const token of run) {
+        if (token.length >= 6 && !isWeakWord(token)) {
+          counts.set(token, (counts.get(token) ?? 0) + 1);
+        }
+      }
       run = [];
     };
 
@@ -527,11 +537,19 @@ function signalsFromProse(corpusText: string, offering: Offering): string[] {
     flush();
   }
 
-  return [...counts.entries()]
+  // Multi-word phrases first, then single words. Both are capped, and the
+  // ordering is what the cap acts on: adding single words without this
+  // evicted "service level objectives" from the list and the prospect who
+  // had written that exact phrase stopped qualifying.
+  const ranked = [...counts.entries()]
     .filter(([phrase]) => phrase.split(" ").some((w) => !isWeakWord(w)))
     .sort((a, b) => b[1] - a[1] || b[0].length - a[0].length)
-    .slice(0, 14)
     .map(([phrase]) => phrase);
+
+  return [
+    ...ranked.filter((phrase) => phrase.includes(" ")).slice(0, 14),
+    ...ranked.filter((phrase) => !phrase.includes(" ")).slice(0, 8),
+  ];
 }
 
 /**

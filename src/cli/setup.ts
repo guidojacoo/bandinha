@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import bcrypt from "bcryptjs";
@@ -14,14 +15,31 @@ import { ask, colour, heading, run } from "./lib";
  * for before seeing anything is a reason they never will.
  */
 
+const PLACEHOLDER_SECRET = "change-me-to-something-random";
+
+const DEFAULT_ENV = `DATABASE_URL="file:./data/mercurio.db"
+AUTH_SECRET="${PLACEHOLDER_SECRET}"
+GROQ_API_KEY=""
+`;
+
 run(async () => {
   heading("Mercurio setup");
 
   const envPath = ".env";
   if (!existsSync(envPath)) {
     const example = existsSync(".env.example") ? readFileSync(".env.example", "utf8") : DEFAULT_ENV;
-    writeFileSync(envPath, example);
-    console.log(`${colour.green("✓")} Wrote ${envPath}`);
+    // The signing key is generated here rather than left as a placeholder.
+    // The console refuses to issue a session on the placeholder value, and
+    // asking someone to generate a key by hand before they can log in is
+    // exactly the kind of setup step that makes people give up.
+    writeFileSync(envPath, example.replace(PLACEHOLDER_SECRET, randomBytes(32).toString("hex")));
+    console.log(`${colour.green("✓")} Wrote ${envPath}, with a fresh AUTH_SECRET.`);
+  } else if (readFileSync(envPath, "utf8").includes(PLACEHOLDER_SECRET)) {
+    writeFileSync(
+      envPath,
+      readFileSync(envPath, "utf8").replace(PLACEHOLDER_SECRET, randomBytes(32).toString("hex")),
+    );
+    console.log(`${colour.green("✓")} Replaced the placeholder AUTH_SECRET in ${envPath}.`);
   } else {
     console.log(`${colour.dim("·")} ${envPath} already exists, left alone.`);
   }
@@ -69,8 +87,3 @@ run(async () => {
   console.log(`  ${colour.bold("npm run dev")}      the operator console on http://localhost:3000\n`);
   console.log(colour.dim("Nothing is sent to a real address until SMTP is configured AND a campaign has live sending armed."));
 });
-
-const DEFAULT_ENV = `DATABASE_URL="file:./data/mercurio.db"
-AUTH_SECRET="change-me-to-something-random"
-GROQ_API_KEY=""
-`;

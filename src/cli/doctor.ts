@@ -23,14 +23,21 @@ run(async () => {
   let problems = 0;
   let warnings = 0;
 
-  const ok = (label: string, detail: string) => console.log(`${colour.green("✓")} ${label.padEnd(22)} ${colour.dim(detail)}`);
+  // Padding is computed on the visible width, not the string length. Labels
+  // carry colour codes, and padEnd counts those, which skews every column
+  // that has a styled suffix.
+  const pad = (label: string, width = 22) => {
+    const visible = label.replace(/\x1b\[[0-9;]*m/g, "").length;
+    return label + " ".repeat(Math.max(1, width - visible));
+  };
+  const ok = (label: string, detail: string) => console.log(`${colour.green("✓")} ${pad(label)} ${colour.dim(detail)}`);
   const warn = (label: string, detail: string) => {
     warnings += 1;
-    console.log(`${colour.yellow("!")} ${label.padEnd(22)} ${detail}`);
+    console.log(`${colour.yellow("!")} ${pad(label)} ${detail}`);
   };
   const bad = (label: string, detail: string) => {
     problems += 1;
-    console.log(`${colour.red("✗")} ${label.padEnd(22)} ${detail}`);
+    console.log(`${colour.red("✗")} ${pad(label)} ${detail}`);
   };
 
   // --- database ----------------------------------------------------------
@@ -80,10 +87,13 @@ run(async () => {
 
   // --- mail --------------------------------------------------------------
   heading("Mail");
-  const mail = describeMailSetup(true);
+  // Described as it is, not as it would be if a campaign were armed —
+  // `describeMailSetup(true)` reports "live sending is armed", which is a
+  // confusing thing to read from a diagnostic that armed nothing.
+  const mail = describeMailSetup(false);
   console.log(`  transport: ${mail.transport}`);
   console.log(`  inbox:     ${mail.inbox}`);
-  if (mail.warning) warn("configuration", mail.warning);
+  console.log(colour.dim("  A campaign also has to be armed in the console before anything is sent."));
 
   if (smtpConfigFromEnv()) {
     const result = await createTransport({ liveSending: true }).verify();
