@@ -7,7 +7,7 @@ import { validateDraft } from "../src/core/draft";
 import { buildCorpus } from "../src/core/provenance";
 import { classifyReply } from "../src/core/classify";
 import { parsePage } from "../src/infra/extract";
-import { parseEml } from "../src/infra/transport/outbox";
+import { parseEml, renderEml } from "../src/infra/transport/outbox";
 import { NullLlm } from "../src/infra/llm";
 import type { DealStage } from "../src/core/types";
 import { icp, lead, offering, sender } from "./factories";
@@ -419,5 +419,32 @@ describe("provenance records the source sentence, not the rewrite", () => {
     expect(result.problems).toEqual([]);
     // The body still addresses them in the second person.
     expect(message.body).toMatch(/You run on Kubernetes/);
+  });
+});
+
+describe("the List-Unsubscribe header", () => {
+  const base = {
+    to: "lena@fableworks.test",
+    subject: "forty pages a week",
+    body: "Hi Lena,\n\nSomething specific.\n\nDana",
+    sender,
+  };
+
+  it("carries the per-recipient link in preference to the shared one", () => {
+    const eml = renderEml({ ...base, optOutUrl: "https://mail.acme.test/api/unsubscribe/abc.def" }, "<id@x>");
+    expect(eml).toContain("List-Unsubscribe: <https://mail.acme.test/api/unsubscribe/abc.def>");
+    expect(eml).toContain("List-Unsubscribe-Post: List-Unsubscribe=One-Click");
+    expect(eml).not.toContain(sender.unsubscribeUrl!);
+  });
+
+  it("falls back to the operator's own URL", () => {
+    expect(renderEml(base, "<id@x>")).toContain(`List-Unsubscribe: <${sender.unsubscribeUrl}>`);
+  });
+
+  it("omits the header entirely when there is no link", () => {
+    // A header that advertises one-click and then 404s is worse than no
+    // header: it tells Gmail to expect something that is not there.
+    const eml = renderEml({ ...base, sender: { ...sender, unsubscribeUrl: undefined } }, "<id@x>");
+    expect(eml).not.toMatch(/List-Unsubscribe/);
   });
 });

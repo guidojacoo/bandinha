@@ -46,6 +46,8 @@ export interface ConverseInput {
   sender: SenderIdentity;
   contactName?: string;
   meetingLink?: string;
+  /** The signed, per-recipient opt-out link. */
+  optOutUrl?: string;
   pages?: Array<{ url: string; text: string }>;
 }
 
@@ -163,6 +165,7 @@ async function draftReply(
       const message = withFooter(
         { subject: "", body: String(result.data.body).trim(), provenance: readProvenance(result.data.provenance) },
         input.sender,
+        input.optOutUrl,
       );
       const validation = validateDraft(message, context);
       const quality = judge(message, input);
@@ -174,7 +177,7 @@ async function draftReply(
     }
   }
 
-  const message = withFooter(templateReply(input, analysis), input.sender);
+  const message = withFooter(templateReply(input, analysis), input.sender, input.optOutUrl);
   return {
     kind: "reply", message, via: "template",
     validation: validateDraft(message, context),

@@ -76,6 +76,7 @@ export class SmtpTransport implements Transport {
   }
 
   async send(message: OutgoingMessage): Promise<SendOutcome> {
+    const optOut = message.optOutUrl ?? message.sender.unsubscribeUrl;
     try {
       const info = await this.client().sendMail({
         from: { name: message.sender.fromName, address: message.sender.fromEmail },
@@ -85,10 +86,12 @@ export class SmtpTransport implements Transport {
         text: message.body,
         inReplyTo: message.inReplyTo,
         references: message.references,
-        headers: message.sender.unsubscribeUrl
+        headers: optOut
           ? {
               // Required by Gmail and Yahoo's bulk-sender rules since 2024.
-              "List-Unsubscribe": `<${message.sender.unsubscribeUrl}>`,
+              // Per-recipient, because a one-click POST to a shared URL
+              // cannot identify who sent it.
+              "List-Unsubscribe": `<${optOut}>`,
               "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
             }
           : undefined,

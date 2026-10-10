@@ -496,9 +496,16 @@ options:
 
 - Every message carries a real sender name, a working reply address and a
   **postal address**. The validator refuses a draft without one.
-- Every message carries a way out, and a `List-Unsubscribe` header with
-  one-click support, which Gmail and Yahoo have required of bulk senders since
-  2024.
+- Every message carries a way out that **actually works**. The footer and the
+  `List-Unsubscribe` header carry a per-recipient link
+  (`/api/unsubscribe/<token>`) whose token is an HMAC over the operator id and
+  the recipient address, so it cannot be edited into somebody else's opt-out
+  and it needs no lookup table. `GET` suppresses first and *then* renders the
+  confirmation — if the write succeeds and the page fails, the person is still
+  unsubscribed. `POST` answers the `List-Unsubscribe-Post: One-Click` that
+  Gmail and Yahoo have required of bulk senders since 2024, and answers `200`
+  even to a token it rejects, because a mailbox provider retries anything else.
+  The tokens never expire; thirty days is the legal floor, not a target.
 - Suppression is global per operator and permanent. An opt-out from one
   campaign applies to every campaign, and the only suppressions that can be
   removed are ones added by hand.
@@ -536,6 +543,7 @@ src/core/        pure: no network, no database, no clock except one passed in
   learning.ts      what actually got replies, and when you cannot tell
   warmup.ts        how much may go out today without burning the domain
   billing.ts       what may be charged for, and the evidence each unit needs
+  optout.ts        a signed, per-recipient way out that needs no lookup table
 
 src/infra/       everything that touches the outside world
   http.ts          the only place that calls fetch: robots, delays, size caps
@@ -562,7 +570,7 @@ src/app/         the operator console (Next.js)
 src/cli/         setup, sell, agent, demo, doctor, discover
 deploy/          cron, systemd and GitHub Actions recipes, all free
 fixtures/        ten sites, five scripted buyers, and a server that speaks Groq
-test/            644 tests
+test/            685 tests
 ```
 
 The split is the point. Everything that has to be *right* — who may be
@@ -577,7 +585,7 @@ against the protocol server, and `payments` exercises the only route that can
 record money, against a throwaway database rather than yours.
 
 ```bash
-npm test         # 644 tests, ~16s
+npm test         # 685 tests, ~16s
 npm run typecheck
 ```
 
@@ -600,7 +608,7 @@ marked as such everywhere they appear. The pure core, the npm, directory and
 seed sources, the crawler, the extractor, the full agent pipeline, the model
 client against Groq's protocol, the quality scorer, the billing layer, the
 payment webhook, the dry-run transport and the console are all proven end to
-end by `npm run demo`, `npm run discover` and 644 tests.
+end by `npm run demo`, `npm run discover` and 685 tests.
 
 And one thing worth saying plainly about the copy: it is measured, and
 measuring is not the same as selling. The scorer encodes what is known to

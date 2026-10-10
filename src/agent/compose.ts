@@ -42,6 +42,13 @@ export interface ComposeInput {
   /** Pages crawled from both sides, for provenance. */
   pages?: Array<{ url: string; text: string }>;
   meetingLink?: string;
+  /**
+   * The signed, per-recipient opt-out link.
+   *
+   * Overrides whatever the sender identity carries, because a shared link
+   * cannot identify who clicked it.
+   */
+  optOutUrl?: string;
   previousMessages?: Array<{ subject: string; body: string }>;
   /**
    * What this market has actually replied to, from `core/learning.ts`.
@@ -113,7 +120,7 @@ export async function compose(input: ComposeInput, llm: Llm): Promise<ComposeRes
       const drafted = await askForDraft(input, llm, critique);
       if (!drafted) break;
 
-      const message = withFooter(drafted, input.sender);
+      const message = withFooter(drafted, input.sender, input.optOutUrl);
       const { validation, quality } = judge(message);
       const via: ComposeResult["via"] = attempt === 1 ? "llm" : "llm-repaired";
 
@@ -142,7 +149,7 @@ export async function compose(input: ComposeInput, llm: Llm): Promise<ComposeRes
   // The template is not a last resort here, it is a competitor: if the model
   // could not beat a deterministic draft on the same scoring, the
   // deterministic draft is what goes out.
-  const templated = withFooter(templateDraft(input), input.sender);
+  const templated = withFooter(templateDraft(input), input.sender, input.optOutUrl);
   const judged = judge(templated);
   attempts.push({
     via: "template",
@@ -579,9 +586,13 @@ const STOP_WORDS = new Set([
  * gets a domain blocklisted. `validateDraft` refuses a message without it, so
  * this runs on both the model and template paths.
  */
-export function withFooter(message: DraftMessage, sender: SenderIdentity): DraftMessage {
+export function withFooter(
+  message: DraftMessage,
+  sender: SenderIdentity,
+  optOutUrl?: string,
+): DraftMessage {
   if (message.body.includes(sender.postalAddress.trim())) return message;
-  return { ...message, body: `${message.body.trim()}\n\n${buildFooter(sender)}` };
+  return { ...message, body: `${message.body.trim()}\n\n${buildFooter(sender, optOutUrl)}` };
 }
 
 export function bestQuote(evidence: LeadEvidence[]): LeadEvidence | undefined {

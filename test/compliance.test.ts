@@ -185,3 +185,31 @@ describe("buildFooter", () => {
     expect(footer.toLowerCase()).toMatch(/unsubscribe|reply/);
   });
 });
+
+describe("buildFooter and the opt-out link", () => {
+  it("prefers the per-recipient link over the operator's shared one", () => {
+    // A shared link cannot tell who clicked it, so it is not really an
+    // opt-out mechanism.
+    const footer = buildFooter(sender, "https://mail.acme.test/api/unsubscribe/abc.def");
+    expect(footer).toContain("https://mail.acme.test/api/unsubscribe/abc.def");
+    expect(footer).not.toContain(sender.unsubscribeUrl!);
+  });
+
+  it("falls back to the operator's own URL when there is no signed one", () => {
+    expect(buildFooter(sender)).toContain(sender.unsubscribeUrl!);
+  });
+
+  it("falls back to reply-to-stop when there is no link at all", () => {
+    // Which genuinely works: the agent reads its replies, and an opt-out is
+    // absorbing. Better than a link to a host that is not serving the app.
+    const footer = buildFooter({ ...sender, unsubscribeUrl: undefined });
+    expect(footer).toMatch(/reply "unsubscribe"/i);
+    expect(footer).not.toMatch(/https?:/);
+  });
+
+  it("always carries the postal address, whichever opt-out is used", () => {
+    for (const link of [undefined, "https://mail.acme.test/api/unsubscribe/abc.def"]) {
+      expect(buildFooter(sender, link)).toContain(sender.postalAddress);
+    }
+  });
+});

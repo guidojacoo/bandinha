@@ -133,11 +133,24 @@ export function evaluateSend(attempt: SendAttempt, config: ComplianceConfig): Co
  * The footer every commercial message carries: who sent it, a real postal
  * address, and a working way out.
  */
-export function buildFooter(sender: SenderIdentity): string {
+/**
+ * The footer every commercial message carries.
+ *
+ * `recipientOptOutUrl` is the per-recipient signed link from
+ * `core/optout.ts`, and it takes precedence over whatever the operator
+ * configured: a shared link cannot tell who clicked it, so a shared link is
+ * not really an opt-out mechanism. The operator's own URL is the fallback for
+ * somebody who has built their own, and the reply-to-stop wording is the
+ * fallback for both — which is a mechanism that genuinely works, because the
+ * agent reads its replies and `core/classify.ts` treats an opt-out as
+ * absorbing.
+ */
+export function buildFooter(sender: SenderIdentity, recipientOptOutUrl?: string): string {
+  const link = recipientOptOutUrl ?? sender.unsubscribeUrl;
   return [
     `${sender.fromName} · ${sender.postalAddress}`,
-    sender.unsubscribeUrl
-      ? `Not relevant? Unsubscribe: ${sender.unsubscribeUrl}`
+    link
+      ? `Not relevant? Unsubscribe: ${link}`
       : `Not relevant? Reply "unsubscribe" and I will remove you immediately.`,
   ].join("\n");
 }

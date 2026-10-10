@@ -105,6 +105,11 @@ export class OutboxInbox implements Inbox {
   }
 }
 
+/** The per-recipient link if there is one, else whatever the operator set. */
+function optOut(message: OutgoingMessage): string | undefined {
+  return message.optOutUrl ?? message.sender.unsubscribeUrl;
+}
+
 export function renderEml(message: OutgoingMessage, messageId: string): string {
   const headers = [
     `Message-ID: ${messageId}`,
@@ -116,9 +121,11 @@ export function renderEml(message: OutgoingMessage, messageId: string): string {
     message.inReplyTo ? `In-Reply-To: ${message.inReplyTo}` : "",
     message.references?.length ? `References: ${message.references.join(" ")}` : "",
     // One-click unsubscribe, as required by bulk-sender rules at Gmail and
-    // Yahoo since 2024. Without it, mail to either is throttled or binned.
-    message.sender.unsubscribeUrl ? `List-Unsubscribe: <${message.sender.unsubscribeUrl}>` : "",
-    message.sender.unsubscribeUrl ? "List-Unsubscribe-Post: List-Unsubscribe=One-Click" : "",
+    // Yahoo since 2024. Without it, mail to either is throttled or binned —
+    // and a header that advertises one-click and then 404s is worse than no
+    // header at all, so it is only emitted when there is a link to emit.
+    optOut(message) ? `List-Unsubscribe: <${optOut(message)}>` : "",
+    optOut(message) ? "List-Unsubscribe-Post: List-Unsubscribe=One-Click" : "",
     "MIME-Version: 1.0",
     'Content-Type: text/plain; charset="utf-8"',
     "Content-Transfer-Encoding: 8bit",

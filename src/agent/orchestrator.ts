@@ -13,6 +13,7 @@ import { qualify } from "./qualify";
 import { billContactDelivered, billReplyReceived } from "./billing";
 import { reportFor } from "./learning";
 import { warmupVerdict, type SendingHistory, type WarmupVerdict } from "../core/warmup";
+import { optOutUrl } from "../core/optout";
 import type { Llm } from "../infra/llm/types";
 import type { Inbox, Transport } from "../infra/transport/types";
 import type {
@@ -252,6 +253,21 @@ export function defaultCompliance(sender: SenderIdentity): ComplianceConfig {
   };
 }
 
+/**
+ * The signed opt-out link for one recipient, or nothing.
+ *
+ * Nothing when PUBLIC_BASE_URL is unset, which is the common case on a laptop
+ * — and then the footer falls back to "reply unsubscribe", which works,
+ * because the agent reads its replies. Pointing a link at a host that is not
+ * serving this app would be worse than having no link.
+ */
+function optOutFor(userId: string, email: string): string | undefined {
+  return optOutUrl(
+    { userId, email },
+    { baseUrl: process.env.PUBLIC_BASE_URL, secret: process.env.AUTH_SECRET },
+  ) ?? undefined;
+}
+
 interface PhaseArgs extends TickOptions {
   now: Date;
   /** Findings from `core/learning.ts` that held up. Usually empty. */
@@ -313,6 +329,7 @@ async function readReplies(args: PhaseArgs & { inbox: Inbox; transport: Transpor
         sender: context.sender,
         contactName: contact.name ?? undefined,
         meetingLink: campaign.meetingLink ?? undefined,
+        optOutUrl: optOutFor(campaign.userId, contact.email),
       },
       args.llm,
     );
@@ -662,6 +679,7 @@ async function sendDue(args: PhaseArgs & { transport: Transport }): Promise<void
         step,
         sender: context.sender,
         meetingLink: campaign.meetingLink ?? undefined,
+        optOutUrl: optOutFor(campaign.userId, enrollment.contact.email),
         previousMessages: previous,
         whatWorks: args.whatWorks,
       },
@@ -803,6 +821,8 @@ async function deliver(args: PhaseArgs & {
     subject: args.subject,
     body: args.body,
     sender: context.sender,
+    // The same link the footer carries, so header and body cannot drift.
+    optOutUrl: optOutFor(campaign.userId, args.contact.email),
     inReplyTo: args.inReplyTo,
   });
 

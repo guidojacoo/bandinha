@@ -92,6 +92,10 @@ run(async () => {
   // sources are exercised by `npm run discover`.
   process.env.SEED_DOMAINS = prospectDomains().map((d) => `http://${d}:${PORT}/`).join(",");
 
+  // So the footers carry a real, signed, per-recipient opt-out link that the
+  // run can then actually click.
+  process.env.PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL ?? "http://localhost:3000";
+
   // A client to bill, so the run shows the money as well as the pipeline.
   await db.client.deleteMany({ where: { userId: user.id, name: "Northwind (demo client)" } });
   const client = await db.client.create({
@@ -201,13 +205,70 @@ run(async () => {
   heading("5. What it earned");
   await settleAndBill(campaign.id, client.id, client.webhookSecret!);
 
+  // --- 5b. the opt-out link, clicked -------------------------------------
+  heading("6. Somebody clicks unsubscribe");
+  await clickUnsubscribe(campaign.id);
+
   // --- 6. what the run taught it ------------------------------------------
-  heading("6. What it learned");
+  heading("7. What it learned");
   await showLearning(campaign.id);
 
   // --- 7. what actually happened ------------------------------------------
   await report(campaign.id, rounds);
 });
+
+/**
+ * Follows the opt-out link out of a message the agent actually sent.
+ *
+ * The footer of every message promises a way to stop, and for most of this
+ * project's life it pointed at a URL nothing served. So the demo now takes a
+ * real link out of a real sent message, puts it through the real route
+ * handler, and checks the address is on the suppression list afterwards —
+ * because the only way to know a promise is kept is to keep it.
+ */
+async function clickUnsubscribe(campaignId: string): Promise<void> {
+  const sent = await db.message.findFirst({
+    where: { campaignId, direction: "outbound", status: "sent" },
+    include: { contact: { include: { lead: { include: { campaign: true } } } } },
+    orderBy: { createdAt: "desc" },
+  });
+  if (!sent) {
+    console.log(colour.dim("  Nothing was sent, so there is no link to click."));
+    return;
+  }
+
+  const link = sent.body.match(/https?:\/\/\S*\/api\/unsubscribe\/\S+/)?.[0];
+  if (!link) {
+    console.log(colour.yellow("  ✗ The message carries no opt-out link. The footer is making a promise nothing keeps."));
+    return;
+  }
+  console.log(`  Link in the message to ${sent.toEmail}:`);
+  console.log(colour.dim(`    ${link}`));
+
+  const token = new URL(link).pathname.split("/").pop()!;
+  const { GET } = await import("../app/api/unsubscribe/[token]/route");
+  const response = await GET(new Request(link), { params: Promise.resolve({ token }) });
+  const confirmed = /You have been unsubscribed|Already unsubscribed/.test(await response.text());
+
+  const suppression = await db.suppression.findUnique({
+    where: { userId_email: { userId: sent.contact.lead.campaign.userId, email: sent.toEmail } },
+  });
+
+  console.log(
+    response.status === 200 && confirmed && suppression
+      ? `  ${colour.green("✓")} Clicked it: ${sent.toEmail} is suppressed (${suppression.reason}) and confirmed on the page.`
+      : `  ${colour.red("✗")} The link did not work — status ${response.status}, suppressed ${Boolean(suppression)}.`,
+  );
+
+  const forged = await GET(new Request("http://localhost/api/unsubscribe/aaaa.bbbb"), {
+    params: Promise.resolve({ token: "aaaa.bbbb" }),
+  });
+  console.log(
+    forged.status === 400
+      ? `  ${colour.green("✓")} A forged token suppresses nobody (400).`
+      : `  ${colour.red("✗")} A forged token was accepted — the signature check is not working.`,
+  );
+}
 
 /**
  * What the run taught it, which on nine prospects is almost nothing.
@@ -385,7 +446,7 @@ async function report(campaignId: string, rounds: Array<Awaited<ReturnType<typeo
     pipelineSummary(campaignId),
   ]);
 
-  heading("7. Leads");
+  heading("8. Leads");
   for (const lead of leads) {
     const verdict = lead.status === "enrolled"
       ? colour.green("enrolled")
@@ -394,7 +455,7 @@ async function report(campaignId: string, rounds: Array<Awaited<ReturnType<typeo
     if (lead.rejectedReason) console.log(colour.dim(`    ${lead.rejectedReason}`));
   }
 
-  heading("8. What it wrote");
+  heading("9. What it wrote");
   const sent = messages.filter((m) => m.direction === "outbound" && m.status === "sent");
   const first = sent.find((m) => m.stepIndex === 0);
   if (first) {
@@ -403,7 +464,7 @@ async function report(campaignId: string, rounds: Array<Awaited<ReturnType<typeo
     for (const line of first.body.split("\n")) console.log(`  ${colour.cyan("│")} ${line}`);
   }
 
-  heading("9. Totals");
+  heading("10. Totals");
   const totals = rounds.reduce(
     (sum, round) => ({
       discovered: sum.discovered + round.discovered,
@@ -430,7 +491,7 @@ async function report(campaignId: string, rounds: Array<Awaited<ReturnType<typeo
   console.log(`  suppressed   ${suppressions.length}`);
   console.log(`\n  Pipeline: ${Object.entries(pipeline.byStage).filter(([, n]) => n > 0).map(([s, n]) => `${s} ${n}`).join(", ")}`);
 
-  heading("10. Did the gates actually fire?");
+  heading("11. Did the gates actually fire?");
   const checks: Array<{ label: string; pass: boolean; detail: string }> = [];
   const byDomain = new Map(leads.map((l) => [l.domain, l]));
 
@@ -528,6 +589,19 @@ async function report(campaignId: string, rounds: Array<Awaited<ReturnType<typeo
     label: "every charge carries its evidence",
     pass: billable.length > 0 && billable.every((e) => e.evidence.length > 30),
     detail: `${billable.length} charge(s)`,
+  });
+
+  const withLink = sent.filter((m) => /\/api\/unsubscribe\//.test(m.body));
+  checks.push({
+    label: "every message carries a working opt-out link",
+    // Not merely a link: one this run followed and that suppressed somebody.
+    pass: sent.length > 0 && withLink.length === sent.length,
+    detail: `${withLink.length} of ${sent.length} sent`,
+  });
+  checks.push({
+    label: "the opt-out link suppressed the person who clicked it",
+    pass: suppressions.some((s) => s.note === "Clicked the unsubscribe link."),
+    detail: suppressions.filter((s) => s.note === "Clicked the unsubscribe link.").map((s) => s.email).join(", ") || "nobody",
   });
 
   checks.push({

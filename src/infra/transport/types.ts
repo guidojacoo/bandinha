@@ -5,6 +5,14 @@ export interface OutgoingMessage {
   subject: string;
   body: string;
   sender: SenderIdentity;
+  /**
+   * The per-recipient opt-out link, for the `List-Unsubscribe` header.
+   *
+   * Separate from the body's footer so the header and the footer cannot drift
+   * apart, and per-recipient because a one-click POST to a shared URL cannot
+   * identify who sent it.
+   */
+  optOutUrl?: string;
   /** RFC 5322 Message-ID of the message this answers. */
   inReplyTo?: string;
   references?: string[];
