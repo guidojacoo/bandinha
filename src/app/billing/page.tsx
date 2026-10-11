@@ -34,6 +34,7 @@ export default async function BillingPage({
   const clients = await db.client.findMany({
     where: { userId: session.userId },
     orderBy: { createdAt: "asc" },
+    take: 200,
     include: { _count: { select: { campaigns: true, events: true } } },
   });
 

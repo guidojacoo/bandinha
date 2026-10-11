@@ -33,10 +33,24 @@ export default async function SuppressionsPage({
   if (!session) redirect("/login");
 
   const params = await searchParams;
-  const suppressions = await db.suppression.findMany({
-    where: { userId: session.userId },
-    orderBy: { createdAt: "desc" },
-  });
+  /**
+   * The one list in the console that only ever grows.
+   *
+   * Every opt-out, every hard bounce and every complaint lands here and
+   * nothing removes them, which is the point — so after a year of sending
+   * this is the longest table in the database and rendering all of it would
+   * be the slowest page in the product. The count comes from the database and
+   * the table shows the most recent.
+   */
+  const SHOWN = 200;
+  const [suppressions, total] = await Promise.all([
+    db.suppression.findMany({
+      where: { userId: session.userId },
+      orderBy: { createdAt: "desc" },
+      take: SHOWN,
+    }),
+    db.suppression.count({ where: { userId: session.userId } }),
+  ]);
 
   return (
     <main>
@@ -50,7 +64,10 @@ export default async function SuppressionsPage({
 
       <div className="grid split">
         <section>
-          <SectionHead title={`${suppressions.length} address(es)`} />
+          <SectionHead
+            title={`${total} address(es)`}
+            note={total > suppressions.length ? <span className="dim">showing the {suppressions.length} most recent</span> : undefined}
+          />
           {suppressions.length === 0 ? (
             <Empty>Nobody has asked to be left alone yet.</Empty>
           ) : (

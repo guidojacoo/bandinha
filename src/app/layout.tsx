@@ -29,6 +29,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             {session && (
               <nav>
                 <a href="/">Campaigns</a>
+                <a href="/queue">Queue</a>
                 <a href="/sources">Sources</a>
                 <a href="/learning">What&apos;s working</a>
                 <a href="/billing">Billing</a>

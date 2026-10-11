@@ -15,12 +15,24 @@ import { formatMoney } from "../../../core/billing";
 import { describeRate } from "../../../core/warmup";
 import { monthToDate } from "../../../agent/billing";
 import { warmupFor, defaultCompliance } from "../../../agent/orchestrator";
-import { peek } from "../../../infra/lock";
+import { WorkerNotice } from "../../../components/worker-notice";
 import type {
   DealStage, FitResult, Icp, LeadProfile, Offering, ProvenanceRecord, ReplyAnalysis, SenderIdentity,
 } from "../../../core/types";
 
 export const dynamic = "force-dynamic";
+
+/** "in 4m", for work that is scheduled rather than late. */
+function untilText(date: Date): string {
+  const seconds = Math.round((date.getTime() - Date.now()) / 1000);
+  if (seconds <= 0) return "is due now";
+  if (seconds < 60) return `in ${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `in ${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `in ${hours}h`;
+  return `in ${Math.round(hours / 24)}d`;
+}
 
 /**
  * The instrument panel.
@@ -51,31 +63,141 @@ export default async function CampaignPage({
   const icp = fromJson<Icp | null>(campaign.icp, null);
   const sender = fromJson<SenderIdentity | null>(campaign.senderIdentity, null);
 
-  const clients = await db.client.findMany({ where: { userId: session.userId }, orderBy: { name: "asc" } });
+  /**
+   * The crawl, while it is happening.
+   *
+   * Landing on the full panel seconds after pasting a URL means a dozen empty
+   * sections and no explanation, so the first minute of a campaign's life gets
+   * its own screen: what the crawler is reading, right now, and — the part
+   * that matters when it is not moving — whether anything is running at all.
+   */
+  if (campaign.status === "ingesting" || !offering || !icp) {
+    const [job, log] = await Promise.all([
+      db.job.findFirst({
+        where: { campaignId: campaign.id, kind: "ingest" },
+        orderBy: { createdAt: "desc" },
+      }),
+      db.event.findMany({ where: { campaignId: campaign.id }, orderBy: { createdAt: "desc" }, take: 20 }),
+    ]);
+    const stuck = campaign.status === "failed" || job?.status === "dead";
+
+    return (
+      <main>
+        {/* Cheap and reliable: the page is a server render, and the crawl
+            finishes in under a minute. Polling it beats a socket here. */}
+        {!stuck && <meta httpEquiv="refresh" content="4" />}
+        <h1 style={{ margin: 0 }}>{campaign.name}</h1>
+        <p className="lede">
+          <span className="mono dim">{campaign.sourceUrl}</span>
+          {" · "}
+          {stuck ? "Could not read this site." : "Reading the site to work out what it sells and who buys it."}
+        </p>
+
+        <WorkerNotice />
+
+        {stuck ? (
+          <div className="banner bad">
+            <div>
+              <strong>The crawl gave up.</strong>{" "}
+              {campaign.error ?? job?.lastError ?? "No detail was recorded."}
+              <div className="dim" style={{ fontSize: 12, marginTop: 4 }}>
+                It was tried {job?.attempts ?? 1} time(s) with a widening gap between attempts. The usual
+                causes are a site that blocks robots, a URL that redirects somewhere else, or a host that
+                was down. Fixing the URL means starting a new campaign; otherwise put the job back from
+                the <a href="/queue">queue</a>.
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="banner">
+            <div>
+              <strong>
+                {job?.status === "running" ? "Reading it now." : job ? "Queued." : "Waiting to be queued."}
+              </strong>{" "}
+              A dozen pages, one at a time, with a pause between each — the crawler identifies itself and
+              honours <span className="mono">robots.txt</span>, which is slower than it could be and the
+              reason it is welcome back tomorrow.
+              {job && job.attempts > 1 && (
+                <div className="dim" style={{ fontSize: 12, marginTop: 4 }}>
+                  Attempt {job.attempts} of {job.maxAttempts}. {job.lastError}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        <section>
+          <SectionHead title="What it has done so far" />
+          {log.length === 0 ? (
+            <Empty>Nothing recorded yet. This page refreshes itself.</Empty>
+          ) : (
+            <div className="card log">
+              {log.map((event) => (
+                <div className="row" key={event.id} data-level={event.level}>
+                  <span className="at">{clock(event.createdAt)}</span>
+                  <span className="kind">{event.kind}</span>
+                  <span className="msg">{event.message}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section>
+          <SectionHead title="What happens when it finishes" />
+          <div className="card">
+            <p className="dim" style={{ margin: 0, fontSize: 13 }}>
+              The offering and the ICP appear here, derived from what the site actually says, and the
+              agent starts looking for companies that match — in package registries, on GitHub, in
+              OpenStreetMap, in whatever directories you point it at. Nothing is sent to anybody until
+              you arm live sending, which is a separate, deliberate action on this page.
+            </p>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  const clients = await db.client.findMany({ where: { userId: session.userId }, orderBy: { name: "asc" }, take: 200 });
   const billed = campaign.clientId ? await monthToDate(campaign.clientId) : null;
 
   const configuredCap = sender
     ? { ...defaultCompliance(sender), ...fromJson<{ dailySendCap?: number }>(campaign.complianceConfig, {}) }.dailySendCap
     : 30;
-  const [warmup, lock] = await Promise.all([
+  const [warmup, job] = await Promise.all([
     warmupFor(campaign.id, configuredCap),
-    // Read-only: looking must not become the thing that stops a tick.
-    peek(campaign.id),
+    // The campaign's one tick row. Its state is the honest answer to "is this
+    // campaign actually working?" — running, waiting until a time, or gave up.
+    db.job.findUnique({ where: { dedupeKey: `tick:${campaign.id}` } }),
   ]);
 
-  const [leads, messages, deals, events, escalations, runs, pipeline, ledger, suppressions] = await Promise.all([
+  /**
+   * How much of a long pipeline this page will load.
+   *
+   * Every list here is capped. A campaign that has been running for a month
+   * has thousands of leads and tens of thousands of messages, and a console
+   * that loads all of them to render the first screenful gets slower every day
+   * until it stops answering — on exactly the installs that are working best.
+   * Counts come from the database; the tables show the top of each list and
+   * say so.
+   */
+  const LEAD_LIMIT = 200;
+
+  const [leads, leadCounts, messages, deals, events, escalations, runs, pipeline, ledger, suppressions] = await Promise.all([
     db.lead.findMany({
       where: { campaignId: campaign.id },
       include: { contacts: true, enrollments: true, deals: true },
       orderBy: [{ fitScore: "desc" }, { createdAt: "asc" }],
+      take: LEAD_LIMIT,
     }),
+    db.lead.groupBy({ by: ["status"], where: { campaignId: campaign.id }, _count: { _all: true } }),
     db.message.findMany({
       where: { campaignId: campaign.id },
       include: { contact: { include: { lead: true } } },
       orderBy: { createdAt: "desc" },
       take: 60,
     }),
-    db.deal.findMany({ where: { campaignId: campaign.id }, include: { lead: true }, orderBy: { updatedAt: "desc" } }),
+    db.deal.findMany({ where: { campaignId: campaign.id }, include: { lead: true }, orderBy: { updatedAt: "desc" }, take: 100 }),
     db.event.findMany({ where: { campaignId: campaign.id }, orderBy: { createdAt: "desc" }, take: 60 }),
     db.event.findMany({ where: { campaignId: campaign.id, kind: "reply.escalated" }, orderBy: { createdAt: "desc" }, take: 20 }),
     db.agentRun.findMany({ where: { campaignId: campaign.id }, orderBy: { startedAt: "desc" }, take: 1 }),
@@ -88,8 +210,11 @@ export default async function CampaignPage({
   const sentCount = messages.filter((m) => m.direction === "outbound" && m.status === "sent").length;
   const blocked = messages.filter((m) => m.status === "blocked");
   const inbound = messages.filter((m) => m.direction === "inbound");
-  const enrolled = leads.filter((l) => l.status === "enrolled");
-  const rejected = leads.filter((l) => l.status === "rejected");
+  const leadsByStatus: Record<string, number> = {};
+  for (const row of leadCounts) leadsByStatus[row.status] = row._count._all;
+  const totalLeads = Object.values(leadsByStatus).reduce((sum, n) => sum + n, 0);
+  const enrolledCount = leadsByStatus.enrolled ?? 0;
+  const rejectedCount = leadsByStatus.rejected ?? 0;
   const lastSent = messages.find((m) => m.direction === "outbound" && m.status === "sent");
 
   const budgetRow = ledger.find((row) => row.model === "*");
@@ -159,10 +284,34 @@ export default async function CampaignPage({
         )}
       </div>
 
-      {lock.held && (
+      <WorkerNotice compact />
+
+      {job?.status === "running" && (
         <div className="banner good">
-          A tick is running right now — {lock.by}. Overlapping ticks would double every send cap, so a second
-          one skips rather than queues.
+          <strong>A tick is running right now</strong> — {job.claimedBy}, since{" "}
+          {ago(job.startedAt ?? job.updatedAt)}. A campaign has exactly one tick row, so nothing else can
+          start a second one; overlapping ticks would double every send cap.
+        </div>
+      )}
+      {job?.status === "queued" && (
+        <div className="banner">
+          <div style={{ flex: 1 }}>
+            <strong>Next tick {untilText(job.runAt)}.</strong>{" "}
+            {job.lastError
+              ? <>The last one failed — <span className="mono">{job.lastError}</span> — and it is attempt {job.attempts} of {job.maxAttempts}.</>
+              : <>Scheduled from this campaign&apos;s own cadence rather than a polling interval, so a pipeline
+                 whose next touch is two days out is not crawled every minute.</>}
+          </div>
+          <form action={runTick}>
+            <input type="hidden" name="campaignId" value={campaign.id} />
+            <button className="ghost" type="submit">Run it now</button>
+          </form>
+        </div>
+      )}
+      {!job && campaign.status === "running" && (
+        <div className="banner warn">
+          <strong>Nothing is scheduled for this campaign.</strong> A worker queues one within five minutes
+          of starting; <span className="mono">npm run worker</span> starts one. <a href="/queue">Queue</a>
         </div>
       )}
 
@@ -183,7 +332,7 @@ export default async function CampaignPage({
 
       <section>
         <div className="grid cols-4">
-          <Metric value={enrolled.length} label="Being worked" hint={`of ${campaign.targetLeads} target`} tone={enrolled.length > 0 ? "good" : undefined} />
+          <Metric value={enrolledCount} label="Being worked" hint={`of ${campaign.targetLeads} target`} tone={enrolledCount > 0 ? "good" : undefined} />
           <Metric value={sentCount} label="Sent" hint={lastSent ? `last ${ago(lastSent.sentAt ?? lastSent.createdAt)}` : "none yet"} />
           <Metric value={inbound.length} label="Replies" hint={`${pipeline.open} open deal(s)`} />
           <Metric
@@ -285,7 +434,10 @@ export default async function CampaignPage({
       <section>
         <SectionHead
           title="Leads"
-          note={`${enrolled.length} being worked · ${rejected.length} rejected · threshold ${campaign.minFitScore}`}
+          note={
+            `${enrolledCount} being worked · ${rejectedCount} rejected · threshold ${campaign.minFitScore}` +
+            (totalLeads > leads.length ? ` · showing the best ${leads.length} of ${totalLeads}` : "")
+          }
         />
         {leads.length === 0 ? (
           <Empty>Nothing discovered yet. Run a tick, and check <a href="/sources">Sources</a> if it finds nothing.</Empty>

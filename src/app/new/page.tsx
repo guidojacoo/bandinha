@@ -21,8 +21,8 @@ export default async function NewCampaignPage({
       <h1>New campaign</h1>
       <p className="lede">
         Paste the website of whatever you are selling. The agent reads it, works out the offer and the buyer,
-        and sets up the pipeline. Reading a dozen pages takes ten to thirty seconds, so this page will sit
-        and think for a moment.
+        and sets up the pipeline. The campaign appears immediately and the crawl happens behind it — a dozen
+        pages fetched politely takes a minute, and you can watch it happen.
       </p>
 
       {params.error === "ingest" && (

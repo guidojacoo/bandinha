@@ -3,6 +3,7 @@ import { db } from "../infra/db";
 import { readSession } from "../lib/auth";
 import { describeMailSetup } from "../infra/transport";
 import { Empty, Metric, Pill, SectionHead, ago } from "../components/ui";
+import { WorkerNotice } from "../components/worker-notice";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +19,9 @@ export default async function CampaignsPage() {
   const campaigns = await db.campaign.findMany({
     where: { userId: session.userId },
     orderBy: { createdAt: "desc" },
+    // Capped like every list here. An agency running a campaign per client
+    // has hundreds, and the newest are the ones being watched.
+    take: 100,
     include: {
       _count: { select: { leads: true, messages: true, deals: true } },
     },
@@ -39,6 +43,7 @@ export default async function CampaignsPage() {
         companies in open data, and writes only to the ones whose own pages show the problem.
       </p>
 
+      <WorkerNotice />
       {mail.warning && <div className="banner warn">{mail.warning}</div>}
       {!mail.live && (
         <div className="banner">

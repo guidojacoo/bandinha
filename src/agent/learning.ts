@@ -24,15 +24,49 @@ const POSITIVE_INTENTS = new Set([
   "interested", "meeting_request", "pricing_question", "commitment", "referral",
 ]);
 
+/**
+ * How many prospects the attribution looks at.
+ *
+ * This runs on every tick, so it is the one query in the system whose cost
+ * grows with success: a campaign that has worked two thousand companies would
+ * otherwise load two thousand leads, their contacts and every message body
+ * attached to them, several times an hour, forever. Two things keep it
+ * bounded — a window, and selecting only the columns the attribution actually
+ * reads, which leaves the message bodies in the database where they belong.
+ *
+ * A window loses nothing that matters. The report is observational, its
+ * findings need a sample of twelve to say anything at all, and what a market
+ * replied to last month is better evidence than what it replied to in
+ * February.
+ */
+const SAMPLE = Number(process.env.LEARNING_SAMPLE ?? 1_000);
+
 export async function outcomesFor(campaignId: string): Promise<Outcome[]> {
   const leads = await db.lead.findMany({
     where: { campaignId, status: "enrolled" },
-    include: {
+    orderBy: { createdAt: "desc" },
+    take: SAMPLE,
+    select: {
+      profile: true,
+      discoveredVia: true,
       // Messages hang off a contact, not off a lead — a company can publish
       // several addresses and the agent writes to one of them. Flattened
       // here rather than denormalised in the schema.
-      contacts: { include: { messages: { orderBy: { createdAt: "asc" } } } },
-      enrollments: true,
+      contacts: {
+        select: {
+          email: true,
+          kind: true,
+          messages: {
+            orderBy: { createdAt: "asc" },
+            select: {
+              direction: true, status: true, stepIndex: true, stepIntent: true,
+              composedVia: true, qualityScore: true, subject: true, toEmail: true,
+              analysis: true, createdAt: true,
+            },
+          },
+        },
+      },
+      enrollments: { select: { state: true } },
     },
   });
 

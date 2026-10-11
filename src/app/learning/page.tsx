@@ -29,6 +29,7 @@ export default async function LearningPage({
   const campaigns = await db.campaign.findMany({
     where: { userId: session.userId },
     orderBy: { createdAt: "desc" },
+    take: 100,
   });
 
   if (campaigns.length === 0) {

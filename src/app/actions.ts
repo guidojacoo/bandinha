@@ -6,12 +6,8 @@ import { redirect } from "next/navigation";
 import { createSession, destroySession, ownedCampaign, readSession, verifyPassword } from "../lib/auth";
 import { db, logEvent } from "../infra/db";
 import { toJson, fromJson } from "../lib/json";
-import { ingest } from "../agent/ingest";
-import { tick } from "../agent/orchestrator";
-import { createLlm } from "../infra/llm";
-import { PrismaBudgetStore, recordModelUsage } from "../infra/db";
+import { enqueue, revive } from "../infra/queue";
 import { smtpConfigFromEnv } from "../infra/transport";
-import { dnsAvailable } from "../infra/dns";
 import { DEFAULT_TERMS, monthOf, type PricingTerms } from "../core/billing";
 import { closeDeal, confirmMeeting, markInvoiced } from "../agent/billing";
 import type { Icp, Offering } from "../core/types";
@@ -28,20 +24,6 @@ import type { Icp, Offering } from "../core/types";
  *  - Arming live sending is the only irreversible thing in the product, so it
  *    is the only action that requires typing a confirmation.
  */
-
-function llm() {
-  return createLlm({
-    store: new PrismaBudgetStore(),
-    onCall: (info) => {
-      void recordModelUsage({
-        model: info.model,
-        inputTokens: info.usage?.inputTokens ?? 0,
-        outputTokens: info.usage?.outputTokens ?? 0,
-        failed: Boolean(info.error) || info.status >= 400,
-      });
-    },
-  });
-}
 
 export async function login(formData: FormData): Promise<void> {
   const email = String(formData.get("email") ?? "");
@@ -62,10 +44,13 @@ export async function logout(): Promise<void> {
 /**
  * The one input: a URL.
  *
- * Ingestion is synchronous here, which is a deliberate limitation rather than
- * an oversight — crawling a dozen pages takes ten to thirty seconds, and a
- * background job queue would be another moving part to run for free. The form
- * says it will take a moment.
+ * The crawl does not happen here. It used to, and a dozen pages fetched
+ * politely is ten to thirty seconds of work inside a form submission — long
+ * enough to hit the request timeout of every hosting platform worth deploying
+ * on, and a timeout there left a campaign that existed but had never been
+ * read. Now the campaign is created in one statement and an `ingest` job is
+ * queued; a worker picks it up within a second or two and the campaign page
+ * shows the crawl happening.
  */
 export async function createCampaign(formData: FormData): Promise<void> {
   const session = await readSession();
@@ -83,19 +68,15 @@ export async function createCampaign(formData: FormData): Promise<void> {
   if (!url) redirect("/new?error=url");
   if (!fromName || !fromEmail || !postalAddress) redirect("/new?error=sender");
 
-  const result = await ingest(url, llm(), { maxPages: 12 });
-  if ("error" in result) {
-    redirect(`/new?error=ingest&detail=${encodeURIComponent(result.error)}`);
-  }
-
   const campaign = await db.campaign.create({
     data: {
       userId: session.userId,
       sourceUrl: url,
-      name: result.offering.companyName,
-      status: "running",
-      offering: toJson(result.offering),
-      icp: toJson(result.icp),
+      // A placeholder until the crawl finds the company's real name. Showing
+      // the host is better than showing nothing, and better than showing a
+      // name the agent has not actually read anywhere.
+      name: hostOf(url),
+      status: "ingesting",
       senderIdentity: toJson({
         fromName, fromEmail, postalAddress,
         unsubscribeUrl: unsubscribeUrl || undefined,
@@ -108,26 +89,69 @@ export async function createCampaign(formData: FormData): Promise<void> {
     },
   });
 
-  await logEvent(campaign.id, "campaign.created", `Created from ${url}.`, {
+  await logEvent(campaign.id, "campaign.created", `Created from ${url}. Reading the site now.`, {
     level: "success",
-    data: { via: result.via, notes: result.notes },
   });
+  await enqueue({ kind: "ingest", campaignId: campaign.id });
 
   redirect(`/campaigns/${campaign.id}`);
 }
 
-/** Runs one tick, synchronously, so the operator sees the result immediately. */
+/** The host, for a name to show until the crawl finds the real one. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url.slice(0, 60);
+  }
+}
+
+/**
+ * Run a tick now.
+ *
+ * Queued, not run. A tick is seconds of crawling and composing and the
+ * occasional model call, and doing that inside a server action means a page
+ * that hangs and a platform that may cut the request halfway through a send.
+ *
+ * It is also the safest possible button. The campaign has exactly one tick
+ * row, so this pulls that row's schedule forward rather than adding a second
+ * job: pressing it twice cannot send anything twice, and pressing it while a
+ * tick is running changes nothing at all.
+ */
 export async function runTick(formData: FormData): Promise<void> {
   const campaignId = String(formData.get("campaignId") ?? "");
   const campaign = await ownedCampaign(campaignId);
   if (!campaign) redirect("/");
 
-  const useDns = await dnsAvailable();
-  await tick({ campaignId: campaign.id, llm: llm(), useDns }).catch(async (error) => {
-    await logEvent(campaign.id, "tick.failed", error instanceof Error ? error.message : String(error), { level: "error" });
-  });
-
+  const kind = campaign.offering && campaign.icp ? "tick" : "ingest";
+  await enqueue({ kind, campaignId: campaign.id });
   revalidatePath(`/campaigns/${campaign.id}`);
+  revalidatePath("/queue");
+}
+
+/**
+ * Put a job that gave up back on the queue.
+ *
+ * The dead letter is where a job lands after it has used its attempts, and
+ * the console shows it because that is the one queue state that wants a
+ * person. This is the other half: having looked at the error and fixed
+ * whatever it was, put the work back.
+ */
+export async function reviveJob(formData: FormData): Promise<void> {
+  const session = await readSession();
+  if (!session) redirect("/login");
+
+  const jobId = String(formData.get("jobId") ?? "");
+  const job = await db.job.findUnique({
+    where: { id: jobId },
+    select: { id: true, campaign: { select: { userId: true } } },
+  });
+  // A job id in a form field is a client-supplied value. One belonging to
+  // somebody else's campaign is simply not there.
+  if (!job || (job.campaign && job.campaign.userId !== session.userId)) redirect("/queue");
+
+  await revive(job.id);
+  revalidatePath("/queue");
 }
 
 export async function setStatus(formData: FormData): Promise<void> {
@@ -140,6 +164,9 @@ export async function setStatus(formData: FormData): Promise<void> {
 
   await db.campaign.update({ where: { id: campaign.id }, data: { status } });
   await logEvent(campaign.id, "campaign.status", `Campaign ${status}.`, { level: status === "paused" ? "warn" : "info" });
+  // A paused campaign's tick is scheduled a long way out, so resuming has to
+  // pull it forward or the campaign would appear to do nothing for an hour.
+  if (status === "running") await enqueue({ kind: "tick", campaignId: campaign.id });
   revalidatePath(`/campaigns/${campaign.id}`);
 }
 

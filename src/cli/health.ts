@@ -2,6 +2,8 @@ import { db } from "../infra/db";
 import { fromJson } from "../lib/json";
 import { warmupFor, pipelineSummary } from "../agent/orchestrator";
 import { peek } from "../infra/lock";
+import { queueStats } from "../infra/queue";
+import { workersAlive } from "../agent/worker";
 import { describeRate } from "../core/warmup";
 import { formatMoney } from "../core/billing";
 import { monthToDate } from "../agent/billing";
@@ -24,6 +26,7 @@ run(async () => {
 
   const campaigns = await db.campaign.findMany({
     orderBy: { createdAt: "desc" },
+    take: 100,
     include: { client: true },
   });
 
@@ -33,6 +36,31 @@ run(async () => {
   }
 
   let needsAttention = 0;
+
+  // --- is anything consuming the queue? -----------------------------------
+  //
+  // First, because it is the failure that makes every other number on this
+  // screen a lie: campaigns running, work scheduled, and nothing to do it.
+  const [stats, workers] = await Promise.all([queueStats(), workersAlive()]);
+  heading("Workers");
+  if (workers.alive > 0) {
+    console.log(`  ${colour.green(`${workers.alive} running`)}  ${colour.dim(workers.names.join(", "))}`);
+  } else if (stats.queued + stats.running > 0) {
+    needsAttention += 1;
+    console.log(`  ${colour.red("none running")}, and ${stats.queued + stats.running} job(s) are waiting.`);
+    console.log(colour.dim("  Nothing will happen until one is. npm run worker, or npm start for the console and a worker together."));
+  } else {
+    console.log(colour.dim("  None running, and nothing queued."));
+  }
+  console.log(colour.dim(`  Queue: ${stats.queued} waiting, ${stats.running} in flight, ${stats.dead} gave up.`));
+  if (stats.dead > 0) {
+    needsAttention += 1;
+    console.log(`  ${colour.yellow(`${stats.dead} job(s) in the dead letter.`)} ${colour.dim("Each campaign is tried again an hour after one dies.")}`);
+  }
+  if (stats.overdue > 0) {
+    needsAttention += 1;
+    console.log(`  ${colour.yellow(`${stats.overdue} job(s) overdue by more than a lease.`)}`);
+  }
 
   for (const campaign of campaigns) {
     heading(`${campaign.name}  ${colour.dim(campaign.id)}`);
