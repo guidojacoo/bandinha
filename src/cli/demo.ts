@@ -260,7 +260,11 @@ async function runThroughTheQueue(campaignId: string): Promise<{
         pollMs: 50,
         onLog: (line) => { if (i === 0) console.log(`    ${colour.dim(line)}`); },
         handler: async (claimed, ctx) => {
-          runs += 1;
+          // This campaign's tick, not any tick. A worker claims whatever is
+          // due, so on a machine with other campaigns running it will pick
+          // those up too — correct behaviour, and it made this count three
+          // when the thing being measured was one.
+          if (claimed.campaignId === campaignId) runs += 1;
           return handleTick(claimed, ctx);
         },
       })),
@@ -268,12 +272,16 @@ async function runThroughTheQueue(campaignId: string): Promise<{
 
   const done = reports.reduce((sum, r) => sum + r.done, 0);
   const finished = await db.job.findUniqueOrThrow({ where: { id: job.id } });
+  const others = done - runs;
   const next = await db.job.findFirst({
     where: { campaignId, status: "queued" },
     orderBy: { runAt: "asc" },
   });
 
-  console.log(`  Four workers wanted it; ${colour.bold(String(done))} got it. The job is ${colour.bold(finished.status)}.`);
+  console.log(`  Four workers wanted it; ${colour.bold(String(runs))} got it. The job is ${colour.bold(finished.status)}.`);
+  if (others > 0) {
+    console.log(colour.dim(`  They also worked ${others} job(s) for other campaigns on this machine, which is the point of a worker.`));
+  }
   if (next) {
     const minutes = Math.round((next.runAt.getTime() - Date.now()) / 60_000);
     console.log(`  Next tick scheduled ${colour.bold(`in ${minutes}m`)} ${colour.dim("— from the campaign's own cadence, not a polling interval.")}`);
@@ -693,10 +701,10 @@ async function report(
 
   // --- the way it actually runs -------------------------------------------
   checks.push({
-    label: "four workers wanted one tick and one ran it",
+    label: "four workers wanted this tick and one ran it",
     // The single assertion the case for scaling out rests on.
     pass: queued.ran === 1,
-    detail: `${queued.ran} run(s)`,
+    detail: `${queued.ran} run(s) of this campaign's tick`,
   });
   checks.push({
     label: "the job finished and recorded what it did",

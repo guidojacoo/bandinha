@@ -187,11 +187,37 @@ export async function logEvent(
 }
 
 /** True when the schema has been applied to the database file. */
+/**
+ * Tables the current code needs that an older database will not have.
+ *
+ * Whatever the most recent schema change added, in other words. Keeping a
+ * list here is mild duplication and it buys a specific thing: a database left
+ * behind by an upgrade answers the first check perfectly well — `users` has
+ * existed since the beginning — and then fails somewhere deep in a tick with
+ * "the table main.jobs does not exist", several minutes and one confusing
+ * stack trace later.
+ */
+const RECENT_TABLES = ["jobs", "workers"] as const;
+
 export async function databaseReady(): Promise<{ ok: boolean; error?: string }> {
   try {
     await db.$queryRaw`SELECT 1 FROM users LIMIT 1`;
-    return { ok: true };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
+
+  for (const table of RECENT_TABLES) {
+    try {
+      // Not parameterisable: a table name is not a value. The list above is
+      // a literal in this file and never comes from input.
+      await db.$queryRawUnsafe(`SELECT 1 FROM ${table} LIMIT 1`);
+    } catch {
+      return {
+        ok: false,
+        error: `This database is older than the code: it has no \`${table}\` table. Run npm run db:push to bring it up to date.`,
+      };
+    }
+  }
+
+  return { ok: true };
 }
