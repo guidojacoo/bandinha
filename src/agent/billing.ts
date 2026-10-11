@@ -4,6 +4,8 @@ import {
   BILLABLE_EVIDENCE, DEFAULT_TERMS, FREE_TERMS, buildInvoice, monthOf,
   type BillableFact, type BillableKind, type Invoice, type PricingTerms,
 } from "../core/billing";
+import { advanceStage } from "./deals";
+import type { DealStage } from "../core/types";
 
 /**
  * Raising charges from facts.
@@ -295,7 +297,16 @@ export async function confirmMeeting(leadId: string, confirmedBy: string): Promi
   const confirmedAt = new Date();
   await db.deal.update({
     where: { leadId },
-    data: { meetingConfirmedAt: confirmedAt, meetingAt: deal.meetingAt ?? confirmedAt, stage: deal.stage === "lost" ? deal.stage : "meeting_booked" },
+    data: {
+      meetingConfirmedAt: confirmedAt,
+      meetingAt: deal.meetingAt ?? confirmedAt,
+      // Ratcheted through the same rule the derivation uses. This had its own
+      // copy of it with only half the rule — "unless it is lost" — so
+      // confirming a meeting on a prospect who had since asked for a contract
+      // pulled the deal back a stage, and confirming one on a deal a payment
+      // had already closed un-won it.
+      stage: advanceStage(deal.stage as DealStage, "meeting_booked"),
+    },
   });
 
   await billMeetingConfirmed({

@@ -22,6 +22,21 @@ AUTH_SECRET="${PLACEHOLDER_SECRET}"
 GROQ_API_KEY=""
 `;
 
+/**
+ * A server URL with the credentials taken out.
+ *
+ * Setup prints what it is about to write to, and a connection string printed
+ * in full is a password in a terminal, a screenshot and a scrollback buffer.
+ */
+function describeServer(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.hostname}${parsed.port ? `:${parsed.port}` : ""}${parsed.pathname}`;
+  } catch {
+    return "the configured database";
+  }
+}
+
 run(async () => {
   heading("Mercurio setup");
 
@@ -45,10 +60,15 @@ run(async () => {
   }
 
   const url = process.env.DATABASE_URL ?? "file:./data/mercurio.db";
-  const file = url.replace(/^file:/, "");
-  mkdirSync(dirname(file) || ".", { recursive: true });
 
-  console.log(`${colour.dim("·")} Applying the schema to ${file}…`);
+  // A file needs its directory to exist first; a server needs nothing from
+  // us. Branching on the scheme rather than assuming a file is what lets the
+  // same command set up either — see `npm run db:provider`.
+  const onAFile = url.startsWith("file:");
+  const target = onAFile ? url.slice("file:".length) : describeServer(url);
+  if (onAFile) mkdirSync(dirname(target) || ".", { recursive: true });
+
+  console.log(`${colour.dim("·")} Applying the schema to ${target}…`);
   try {
     execFileSync("npx", ["prisma", "db", "push", "--skip-generate", "--accept-data-loss"], {
       stdio: process.env.DEBUG === "1" ? "inherit" : "pipe",

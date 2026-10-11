@@ -1,0 +1,12 @@
+node_modules
+.next
+.git
+data
+outbox
+inbox
+*.db
+*.db-journal
+.env
+.env.local
+src/generated
+coverage

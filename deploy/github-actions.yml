@@ -1,32 +1,40 @@
 # Mercurio on GitHub Actions.
 #
-# Copy to .github/workflows/mercurio.yml, set the secrets below, and replace
-# CAMPAIGN_ID. Free on the Actions free tier; a tick takes well under a
-# minute of runner time.
+# Copy to .github/workflows/mercurio.yml and set the secrets below. Free on
+# the Actions free tier; a drain run takes well under a minute of runner time.
+#
+# It runs a worker with --drain: work through everything that is due, then
+# exit. No campaign id, because a worker finds every campaign that is supposed
+# to be running — adding a second campaign needs no change here.
 #
 # IMPORTANT: do not run this on a public repository. The database it commits
-# holds prospect addresses and the bodies of messages sent to them.
-name: Mercurio agent
+# holds prospect addresses and the bodies of messages sent to them. If that is
+# a problem, and it should be, put DATABASE_URL in the secrets pointing at a
+# free Postgres (Neon, Supabase) and delete the restore and save steps —
+# `npm run db:provider -- postgres` first, and commit that change.
+name: Mercurio worker
 
 on:
   schedule:
     # Every two hours during European business hours, weekdays. The send
     # window and the daily cap control volume; this only controls how often
-    # the agent gets a chance to act.
+    # the agent gets a chance to act. A long-running worker would schedule
+    # itself far more precisely — this is the price of having no machine.
     - cron: "17 7-17/2 * * 1-5"
   workflow_dispatch:
 
-# One run at a time. The agent takes its own lock as well, but a queued
-# workflow is tidier than a skipped tick.
+# One run at a time. Overlapping runs are harmless — a job can only be
+# claimed once — but a queued workflow is tidier than two runners racing over
+# the same committed database file.
 concurrency:
-  group: mercurio-agent
+  group: mercurio-worker
   cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
-  tick:
+  work:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -47,7 +55,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: code/package-lock.json
 
@@ -71,7 +79,7 @@ jobs:
           DATABASE_URL: file:./data/mercurio.db
         run: npx prisma db push --skip-generate --accept-data-loss
 
-      - name: Run one tick
+      - name: Work whatever is due
         working-directory: code
         env:
           DATABASE_URL: file:./data/mercurio.db
@@ -87,9 +95,9 @@ jobs:
           # Optional discovery configuration.
           DIRECTORY_URLS: ${{ secrets.DIRECTORY_URLS }}
           SEED_DOMAINS: ${{ secrets.SEED_DOMAINS }}
-        # The tick's own exit code matters: a failure should show up red
-        # rather than being swallowed by the commit step that follows.
-        run: npm run agent -- CAMPAIGN_ID
+        # The run's own exit code matters: a failure should show up red rather
+        # than being swallowed by the commit step that follows.
+        run: npm run worker -- --drain --concurrency 2
 
       - name: Save the database back
         if: always()

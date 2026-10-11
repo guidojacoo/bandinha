@@ -10,6 +10,8 @@ import { headline, reportFor } from "../agent/learning";
 import { rate } from "../core/learning";
 import { ingest } from "../agent/ingest";
 import { pipelineSummary, tick } from "../agent/orchestrator";
+import { handleTick, runWorker } from "../agent/worker";
+import { enqueue } from "../infra/queue";
 import { fromJson, toJson } from "../lib/json";
 import { fetchText } from "../infra/http";
 import { prospectDomains, world } from "../../fixtures/world";
@@ -213,9 +215,78 @@ run(async () => {
   heading("7. What it learned");
   await showLearning(campaign.id);
 
+  // --- 6b. and the way it actually runs ----------------------------------
+  heading("8. The same campaign, run by a worker");
+  const queued = await runThroughTheQueue(campaign.id);
+
   // --- 7. what actually happened ------------------------------------------
-  await report(campaign.id, rounds);
+  await report(campaign.id, rounds, queued);
 });
+
+/**
+ * The production path, in the same run that proved everything else.
+ *
+ * Everything above calls `tick` directly, which is the right way to narrate a
+ * run but is not how this works when nobody is watching: a worker claims the
+ * campaign's job, runs it, records what it did and schedules the next one. So
+ * the last thing the demo does is put the campaign through that path and
+ * check the mechanics — that the one job row went from queued to done, that
+ * exactly one run happened, and that the next tick is scheduled, which is the
+ * part that makes the agent keep going by itself.
+ *
+ * The clock is the real one here rather than the demo's pinned business hour,
+ * so this is about the queue rather than about sending. A tick at midnight
+ * correctly refuses to send; it should still claim, run, record and
+ * reschedule.
+ */
+async function runThroughTheQueue(campaignId: string): Promise<{
+  ran: number; status: string; nextRunAt: Date | null; recorded: boolean;
+}> {
+  const { job } = await enqueue({ kind: "tick", campaignId, runAt: new Date() });
+  console.log(`  Queued one tick: job ${colour.dim(job.id)}`);
+
+  // Four workers, two slots each, against one campaign. Eight processes-worth
+  // of appetite for one piece of work, which is the situation the whole claim
+  // discipline exists for.
+  let runs = 0;
+  const reports = await Promise.all(
+    Array.from({ length: 4 }, (_, i) =>
+      runWorker({
+        llm: llmForRun(),
+        name: `demo/${i + 1}`,
+        concurrency: 2,
+        exitWhenIdle: true,
+        seed: false,
+        pollMs: 50,
+        onLog: (line) => { if (i === 0) console.log(`    ${colour.dim(line)}`); },
+        handler: async (claimed, ctx) => {
+          runs += 1;
+          return handleTick(claimed, ctx);
+        },
+      })),
+  );
+
+  const done = reports.reduce((sum, r) => sum + r.done, 0);
+  const finished = await db.job.findUniqueOrThrow({ where: { id: job.id } });
+  const next = await db.job.findFirst({
+    where: { campaignId, status: "queued" },
+    orderBy: { runAt: "asc" },
+  });
+
+  console.log(`  Four workers wanted it; ${colour.bold(String(done))} got it. The job is ${colour.bold(finished.status)}.`);
+  if (next) {
+    const minutes = Math.round((next.runAt.getTime() - Date.now()) / 60_000);
+    console.log(`  Next tick scheduled ${colour.bold(`in ${minutes}m`)} ${colour.dim("— from the campaign's own cadence, not a polling interval.")}`);
+  }
+  console.log(colour.dim("  That is the whole unattended loop: claim, work, record, reschedule."));
+
+  return {
+    ran: runs,
+    status: finished.status,
+    nextRunAt: next?.runAt ?? null,
+    recorded: Boolean(finished.result),
+  };
+}
 
 /**
  * Follows the opt-out link out of a message the agent actually sent.
@@ -437,7 +508,11 @@ async function runBuyers(): Promise<void> {
   }
 }
 
-async function report(campaignId: string, rounds: Array<Awaited<ReturnType<typeof tick>>>): Promise<void> {
+async function report(
+  campaignId: string,
+  rounds: Array<Awaited<ReturnType<typeof tick>>>,
+  queued: { ran: number; status: string; nextRunAt: Date | null; recorded: boolean },
+): Promise<void> {
   const [leads, messages, escalations, suppressions, pipeline] = await Promise.all([
     db.lead.findMany({ where: { campaignId }, include: { contacts: true }, orderBy: { fitScore: "desc" } }),
     db.message.findMany({ where: { campaignId }, include: { contact: true }, orderBy: { createdAt: "asc" } }),
@@ -614,6 +689,25 @@ async function report(campaignId: string, rounds: Array<Awaited<ReturnType<typeo
       return !sent.some((m) => m.toEmail === s.email && m.createdAt.getTime() > suppressedAt);
     }),
     detail: `${suppressions.length} suppression(s)`,
+  });
+
+  // --- the way it actually runs -------------------------------------------
+  checks.push({
+    label: "four workers wanted one tick and one ran it",
+    // The single assertion the case for scaling out rests on.
+    pass: queued.ran === 1,
+    detail: `${queued.ran} run(s)`,
+  });
+  checks.push({
+    label: "the job finished and recorded what it did",
+    pass: queued.status === "done" && queued.recorded,
+    detail: `${queued.status}${queued.recorded ? ", result stored" : ", nothing stored"}`,
+  });
+  checks.push({
+    label: "the next tick is already scheduled",
+    // What makes it unattended rather than a command somebody has to repeat.
+    pass: queued.nextRunAt !== null,
+    detail: queued.nextRunAt ? `at ${queued.nextRunAt.toISOString()}` : "nothing scheduled",
   });
 
   let failures = 0;

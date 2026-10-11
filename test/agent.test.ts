@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { converse } from "../src/agent/converse";
 import { bestQuote, observationFrom, overlaps, pitchSentence, templateDraft, withFooter } from "../src/agent/compose";
-import { enrollmentEventFor, stageFor, isTerminalStage } from "../src/agent/deals";
+import { STAGE_ORDER, advanceStage, enrollmentEventFor, stageFor, isTerminalStage, stageRank } from "../src/agent/deals";
 import { readOffering } from "../src/agent/ingest";
 import { validateDraft } from "../src/core/draft";
 import { buildCorpus } from "../src/core/provenance";
@@ -328,6 +328,57 @@ describe("stageFor", () => {
   it("knows which stages are terminal", () => {
     expect(isTerminalStage("won")).toBe(true);
     expect(isTerminalStage("proposal")).toBe(false);
+  });
+
+  it("does not drag a deal back to the meeting it already booked", () => {
+    // Found by a demo run rather than by reading the code. A prospect books a
+    // call, then asks for the contract — `proposal`. The next tick still sees
+    // the booked meeting and used to return `meeting_booked` outright, so the
+    // deal moved backwards, and the payment webhook, which looks for a
+    // proposal to close, no longer found one. The sale disappeared.
+    expect(stageFor({ current: "proposal", sentCount: 3, meetingBooked: true })).toBe("proposal");
+  });
+
+  it("will not un-win a deal because a meeting was confirmed", () => {
+    expect(stageFor({ current: "won", sentCount: 3, meetingBooked: true })).toBe("won");
+  });
+});
+
+describe("advanceStage", () => {
+  it("advances", () => {
+    expect(advanceStage("contacted", "meeting_booked")).toBe("meeting_booked");
+  });
+
+  it("refuses to go backwards", () => {
+    expect(advanceStage("proposal", "engaged")).toBe("proposal");
+    expect(advanceStage("proposal", "meeting_booked")).toBe("proposal");
+  });
+
+  it("is absorbed by a terminal stage, whatever is proposed", () => {
+    for (const candidate of STAGE_ORDER) {
+      expect(advanceStage("won", candidate)).toBe("won");
+      expect(advanceStage("lost", candidate)).toBe("lost");
+    }
+  });
+
+  it("is idempotent, which is what makes it safe to recompute every tick", () => {
+    for (const current of STAGE_ORDER) {
+      for (const candidate of STAGE_ORDER) {
+        const once = advanceStage(current, candidate);
+        expect(advanceStage(once, candidate)).toBe(once);
+      }
+    }
+  });
+
+  it("is monotonic over every pair of stages", () => {
+    // The property the whole derivation rests on: no sequence of recomputed
+    // stages can lose ground.
+    for (const current of STAGE_ORDER) {
+      for (const candidate of STAGE_ORDER) {
+        const next = advanceStage(current, candidate);
+        expect(stageRank(next)).toBeGreaterThanOrEqual(stageRank(current));
+      }
+    }
   });
 });
 

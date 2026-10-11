@@ -15,6 +15,12 @@ No paid data vendor. No seat licence. No API key that is required rather than
 optional. SQLite on disk, Groq's free tier for the model, open data for the
 leads.
 
+`npm start` runs the whole thing: the console, and a worker that keeps every
+campaign moving. Start more workers, on as many machines as you like, and the
+work spreads — the right to do a piece of work is a claimed row, so nothing is
+ever done twice. When a file stops being enough, one command moves it to
+Postgres, and the same 820 tests pass there.
+
 ---
 
 ## Why
@@ -59,9 +65,15 @@ So the design rule is *structurally incapable*, not *instructed not to*:
 ```bash
 npm install
 npm run setup          # creates .env, the database, and your account
+npm run build
+npm start              # the console on :3000, and a worker
 ```
 
-Then, in two terminals:
+That is the whole product. `npm start` runs both halves, because a console
+with no worker is the one failure where every page looks healthy and nothing
+ever happens.
+
+To watch a full run against the bundled fixture web instead, in two terminals:
 
 ```bash
 sudo npm run fixtures:hosts   # point the demo's .test names at localhost (once)
@@ -89,7 +101,7 @@ for. So the run contacts four of nine with no model configured.
 Expected output, end of run:
 
 ```
-8. Did the gates actually fire?
+11. Did the gates actually fire?
   ✓ burnrate.test rejected                         Disqualified: they describe themselves as "error budget tracking"
   ✓ tinycrew.test rejected                         Fit 53 is below the 60 threshold
   ✓ opaque.test rejected                           Nothing specific enough to write about was found
@@ -100,28 +112,43 @@ Expected output, end of run:
   ✓ no message sent without a way out
   ✓ every claim traced to a crawled page
   ✓ opt-out suppressed globally
-  ✓ commitment and pricing escalated, not closed
   ✓ the agent closed no deal by itself
   ✓ billed one contact per prospect, not one per message
   ✓ one reply charge per prospect, none for a bounce or a complaint
   ✓ a meeting was billed only after a person confirmed it
   ✓ every won deal was closed by a payment or a person
   ✓ every charge carries its evidence
+  ✓ every message carries a working opt-out link
+  ✓ the opt-out link suppressed the person who clicked it
   ✓ nothing sent to a suppressed address afterwards
+  ✓ four workers wanted one tick and one ran it
+  ✓ the job finished and recorded what it did
+  ✓ the next tick is already scheduled
 
-  All 17 checks passed.
+  All 22 checks passed.
 ```
 
 ```
-8. Totals
-  discovered   9        qualified    5        rejected     4
-  enrolled     5        sent         5        blocked      0
-  replies read 7        answered     2        escalated    2
-  suppressed   2
+10. Totals
+  discovered   9        qualified    4        rejected     5
+  enrolled     4        sent         4        blocked      0
+  replies read 6        answered     2        escalated    1
+  suppressed   3
+
+  Pipeline: engaged 1, won 1, lost 2
 ```
 
 The run also confirms a meeting, takes a payment through the signed webhook,
-proves an *unsigned* one is refused, and prints the invoice with its evidence.
+proves an *unsigned* one is refused, prints the invoice with its evidence,
+follows a real unsubscribe link out of a real message, and — last — puts the
+same campaign through the production path: four workers racing for one tick,
+one of them getting it, the result recorded and the next tick scheduled.
+
+The last three checks are there because that section found a real bug the day
+it was written. Confirming a meeting on a prospect who had since asked for a
+contract pulled the deal *back* a stage, after which the payment webhook could
+no longer find a proposal to close and the sale vanished. Two writers of the
+deal stage, one of them with the ratchet left out.
 
 Read `./outbox` afterwards. Those `.eml` files are exactly what would have been
 sent.
@@ -140,7 +167,7 @@ Backstage, Pydantic — with no paid vendor involved.
 ### And the console
 
 ```bash
-npm run dev    # http://localhost:3000
+npm run dev    # http://localhost:3000, with a worker and hot reload
 ```
 
 ---
@@ -148,16 +175,25 @@ npm run dev    # http://localhost:3000
 ## Running it for real
 
 ```bash
-npm run sell -- https://your-company.com
-npm run agent -- <campaignId> --loop
+npm run build
+npm start                             # the console and a worker
 npm run health                        # is anything wrong, is anything waiting
 ```
 
+Then paste a URL into the console, or do it from a terminal:
+
+```bash
+npm run sell -- https://your-company.com
+```
+
 `npm run sell` reads your site, prints the offer and the ICP it derived, asks
-for a sender identity, and creates the campaign. `npm run agent` ticks: reads
-replies, discovers, qualifies, enrols, sends. A tick is idempotent and
-resumable, so it works equally as a one-shot, a loop in a terminal, or a cron
-entry.
+for a sender identity, and creates the campaign. From there the worker does
+the rest, forever: reads replies, discovers, qualifies, enrols, sends, and
+schedules its next look at the campaign from the campaign's own cadence.
+
+`npm run agent -- <campaignId>` still runs a single tick by hand if you want
+to watch one happen. It takes the same claim a worker takes, so it cannot
+collide with one.
 
 **Nothing reaches a real inbox until two separate things are true**: SMTP is
 configured in `.env`, *and* that campaign has live sending armed in the
@@ -167,17 +203,47 @@ environment variable should not mail three hundred strangers.
 `npm run doctor` tells you what works on your machine and what does not —
 every check is run live rather than inferred from configuration.
 
-### Leaving it running
+### Leaving it running, and running more of it
 
-`deploy/` has cron, systemd and GitHub Actions recipes, all free. Three things
-make unattended running safe, and they matter more than the scheduler you pick:
+A worker is the answer to both. It comes up, finds every campaign that is
+supposed to be working, works them, and keeps doing that through reboots and
+failures. `deploy/` has systemd, cron and GitHub Actions recipes, all free.
 
-**A lock.** Every tick takes a per-campaign lock first. A schedule firing
-every ten minutes against a tick that occasionally takes twelve *will*
-overlap, and two overlapping ticks both read "sent today: 4", both decide
-there is room, and quietly double the daily cap, the per-domain cap and the
-anti-pester gap. A second tick finding the lock held skips rather than queues,
-and says so.
+```bash
+npm start -- --workers 4              # four workers beside the console
+npm start -- --no-worker              # console only, workers live elsewhere
+npm run worker -- --concurrency 4     # a worker, on any machine
+```
+
+Scaling out is not a different mode. Work is a row; a worker claims it, and
+the claim is the only thing that grants the right to act. So a tenth worker on
+a tenth machine needs no configuration and no coordinator — it just has to
+reach the same database. Four things make that safe, and they matter more than
+the scheduler you pick:
+
+**At most one live job per campaign, enforced by the database.** Not a lock: a
+lock is held by a process, and when the other process is on another machine
+the lock is imaginary. It is a unique index on a dedupe key that is cleared
+when a job goes terminal, so a running campaign has exactly one tick row for
+its whole life, moving between queued and running. Overlapping ticks would
+both read "sent today: 4", both decide there is room, and quietly double the
+daily cap, the per-domain cap and the anti-pester gap — every one of those is
+a deliberate protection and they are worth nothing if a second process can
+walk past them. Pressing "Run now" twice claims the one row that exists a
+little early. It cannot make a second.
+
+**Claims expire, and any worker reaps them.** A worker renews its claim while
+it works; one that dies stops renewing, and the next worker takes the job
+over. Without that, a single crash parks a campaign forever — and a campaign
+that quietly stopped is the failure this whole design is against. A clean
+shutdown hands claims back without spending an attempt, so a rolling restart
+costs nothing.
+
+**A dead letter that is loud and temporary.** A job that has used its attempts
+stops costing anything and starts being visible, on the campaign and on the
+queue page. An hour later the campaign is tried again, because most dead jobs
+are something that passes — a site that was down, a provider having an outage,
+a release with a bug in it — and waiting for somebody to notice is worse.
 
 **A warmup ramp.** The daily cap is not a constant. It starts at 15% of what
 you configured, reaches the full figure over about four weeks, halves itself
@@ -191,15 +257,54 @@ to spam for a fortnight and the only fix is a new domain.
 A verdict never blocks a *reply*. A halt is about not sending unwanted mail to
 strangers; somebody who wrote to you and is waiting is the opposite case.
 
-**A failure ceiling.** `--loop` stops after three consecutive failures, with
-exponential backoff between them. A loop that retries forever on a broken
-campaign looks identical to one that is working, which is the worst property
-an unattended process can have.
+`npm run health` answers the questions that matter once it is on a timer — is
+a worker running, is anything wrong, is anything waiting for a person — and
+exits non-zero when the answer is yes, so a monitoring check can watch it
+rather than parse it.
 
-`npm run health` answers the only two questions that matter once it is on a
-timer — is anything wrong, and is anything waiting for a person — and exits
-non-zero when the answer is yes, so a monitoring check can watch it rather
-than parse it.
+`GET /api/health` answers the same in one unauthenticated request, which is
+what a free uptime monitor needs. `degraded` is a real state and the useful
+one: work queued with nothing consuming it, a job overdue by more than a
+lease, anything in the dead letter. It returns 200 for that and 503 only for a
+database that did not answer, so whoever gets paged at 3am gets paged for the
+thing that cannot wait. It says nothing an operator would mind a stranger
+seeing — counts and states, no names, no addresses, no copy — and that is a
+test rather than an intention.
+
+### When a file stops being enough
+
+SQLite is the right default: free, no server, no account, `npm run setup`
+creates it. Its one ceiling is a single writer. A console and a couple of
+workers on a file is fine; a dozen workers spend their time retrying
+`SQLITE_BUSY`. That is the point to move, and it is one command:
+
+```bash
+npm run db:provider -- postgres
+npx prisma generate
+npm run db:push
+```
+
+Nothing else changes, because nothing in the schema is engine-specific — and
+that is not a hope, it is checked. There are no native enums (status columns
+are strings with TypeScript unions as the source of truth), no `Json` columns
+(structured fields are TEXT through typed helpers), no `@db.` native types,
+and every table is named explicitly. Those were SQLite's constraints and they
+are now portability for free; `test/schema.test.ts` fails if one is relaxed.
+
+The whole suite runs against either, which is how that claim is proved rather
+than asserted:
+
+```bash
+TEST_DATABASE_URL="postgresql://postgres@127.0.0.1:5432/mercurio" npm test
+```
+
+820 tests on SQLite, the same 820 on Postgres 16 — including the queue's
+compare-and-set claim, the six-worker race, the payment webhook and the
+one-click unsubscribe. Neon and Supabase both have a free tier that fits, so
+it stays free.
+
+`docker compose up --scale worker=4` brings up the console and four workers;
+`--profile postgres` adds the database.
 
 ---
 
@@ -544,17 +649,19 @@ src/core/        pure: no network, no database, no clock except one passed in
   warmup.ts        how much may go out today without burning the domain
   billing.ts       what may be charged for, and the evidence each unit needs
   optout.ts        a signed, per-recipient way out that needs no lookup table
+  queue.ts         claimable, retry-or-dead, and how soon to look again
 
 src/infra/       everything that touches the outside world
   http.ts          the only place that calls fetch: robots, delays, size caps
-  lock.ts          so two ticks cannot double-send
+  queue.ts         the claim: a conditional UPDATE, atomic on a file or a cluster
+  lock.ts          a second guard for two commands racing on one machine
   extract.ts       HTML into facts (pure, so every rule is testable)
   crawler.ts       a polite, budgeted, priority-ordered site crawler
   dns.ts           MX lookups
   llm/             Groq, where degrading is a first-class outcome
   sources/         ten open-data prospect sources; five are one adapter path
   transport/       outbox (default), SMTP, IMAP
-  db.ts            SQLite via Prisma, plus the persistent token ledger
+  db.ts            Prisma; SQLite by default, Postgres by one command
 
 src/agent/       the pipeline
   ingest.ts        one URL -> a sellable position
@@ -565,12 +672,14 @@ src/agent/       the pipeline
   billing.ts       raising charges from facts, and the only path to `won`
   learning.ts      attributing replies back to what produced them
   orchestrator.ts  one tick: replies, discover, qualify, enrol, send
+  worker.ts        the loop: claim, work, record, reschedule, reap
 
-src/app/         the operator console (Next.js)
-src/cli/         setup, sell, agent, demo, doctor, discover
+src/app/         the operator console (Next.js), plus /api/health
+src/cli/         setup, sell, worker, agent, demo, doctor, discover, health
+scripts/         start.mjs (console + workers), datasource.ts (sqlite/postgres)
 deploy/          cron, systemd and GitHub Actions recipes, all free
 fixtures/        ten sites, five scripted buyers, and a server that speaks Groq
-test/            685 tests
+test/            820 tests
 ```
 
 The split is the point. Everything that has to be *right* — who may be
@@ -580,13 +689,19 @@ what may be charged for — is a pure function with its inputs passed in. That
 is why the dangerous paths can be tested exhaustively without an inbox, a
 resolver, or a model.
 
-Two test files are deliberately not pure: `groq-wire` runs the real client
-against the protocol server, and `payments` exercises the only route that can
-record money, against a throwaway database rather than yours.
+Six test files are deliberately not pure, and each has a reason it has to be.
+`groq-wire` runs the real model client against a local server that implements
+Groq's protocol, because Groq is unreachable from here and the alternative was
+shipping that path untested. `payments` exercises the only route that can
+record money. `queue-db` proves the claim is genuinely atomic, which is a
+property of the database rather than of a function. `worker` races six workers
+over ten campaigns and counts. `unsubscribe` and `health` are route handlers.
+All six run against a throwaway database, never yours.
 
 ```bash
-npm test         # 685 tests, ~16s
+npm test         # 820 tests, ~20s
 npm run typecheck
+TEST_DATABASE_URL="postgresql://…" npm test   # the same 820, on Postgres
 ```
 
 ---
@@ -608,7 +723,7 @@ marked as such everywhere they appear. The pure core, the npm, directory and
 seed sources, the crawler, the extractor, the full agent pipeline, the model
 client against Groq's protocol, the quality scorer, the billing layer, the
 payment webhook, the dry-run transport and the console are all proven end to
-end by `npm run demo`, `npm run discover` and 685 tests.
+end by `npm run demo`, `npm run discover` and 820 tests.
 
 And one thing worth saying plainly about the copy: it is measured, and
 measuring is not the same as selling. The scorer encodes what is known to

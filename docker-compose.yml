@@ -1,0 +1,69 @@
+# Mercurio, with as many workers as you want.
+#
+#   docker compose up                       console + one worker, on SQLite
+#   docker compose up --scale worker=4      four workers
+#   docker compose --profile postgres up    the same, on Postgres
+#
+# The last one needs the schema switched first, because the Prisma client is
+# generated for one provider at a time:
+#
+#   npm run db:provider -- postgres
+#
+# Everything here is free: the image is built locally, Postgres is the
+# official image, and nothing phones home.
+
+services:
+  console:
+    build: .
+    command: ["npm", "start", "--", "--no-worker"]
+    ports: ["3000:3000"]
+    env_file: [.env]
+    environment:
+      # Where the unsubscribe links point. Wrong here means a footer promising
+      # a link that resolves to nothing, which is the one bug in this product
+      # that is also a legal problem.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
+    volumes:
+      - data:/app/data
+      - outbox:/app/outbox
+      - inbox:/app/inbox
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["npm", "run", "worker", "--", "--concurrency", "2"]
+    env_file: [.env]
+    # No ports. A worker is not reachable and does not need to be; it claims
+    # rows and does the work.
+    volumes:
+      - data:/app/data
+      - outbox:/app/outbox
+      - inbox:/app/inbox
+    depends_on: [console]
+    restart: unless-stopped
+
+  # Only with --profile postgres. SQLite's single writer is the first ceiling
+  # this hits: a console and two workers on a file is fine, a dozen workers
+  # spend their time retrying SQLITE_BUSY.
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mercurio}
+      POSTGRES_USER: ${POSTGRES_USER:-mercurio}
+      POSTGRES_DB: ${POSTGRES_DB:-mercurio}
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mercurio}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  data:
+  outbox:
+  inbox:
+  pgdata:

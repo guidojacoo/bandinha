@@ -51,7 +51,13 @@ export function stageFor(input: StageInput): DealStage {
   const intent = input.lastReply?.intent;
 
   if (intent === "unsubscribe" || intent === "not_interested" || intent === "bounce") return "lost";
-  if (input.meetingBooked || intent === "meeting_request") return "meeting_booked";
+  // Ratcheted, and that mattered: this used to return `meeting_booked`
+  // outright, so a prospect who had already asked for a contract — a deal at
+  // `proposal` — was dragged back a stage by the meeting they had booked
+  // earlier. The demo found it by confirming a meeting on a deal that had
+  // moved on, after which the payment webhook could no longer find a proposal
+  // to close and the sale vanished.
+  if (input.meetingBooked || intent === "meeting_request") return advanceStage(input.current, "meeting_booked");
 
   // "Send me the contract" is a proposal stage, not a win. The win is the
   // signature, which the agent cannot observe.
@@ -60,15 +66,29 @@ export function stageFor(input: StageInput): DealStage {
   if (intent && ["interested", "objection", "not_now", "referral", "wrong_person", "unclear"].includes(intent)) {
     // A reply is engagement even when it is a complaint. It is the only
     // honest reading: somebody read it and typed something back.
-    return rachet(input.current, "engaged");
+    return advanceStage(input.current, "engaged");
   }
 
-  if (input.sentCount > 0) return rachet(input.current, "contacted");
+  if (input.sentCount > 0) return advanceStage(input.current, "contacted");
   return input.current;
 }
 
-/** Never moves a deal backwards; an earlier reply cannot undo a later one. */
-function rachet(current: DealStage, candidate: DealStage): DealStage {
+/**
+ * The two rules, in one function.
+ *
+ * A deal never moves backwards, and a terminal stage absorbs. Both exist
+ * because the stage is *derived*: it is recomputed from the evidence on every
+ * tick, and anything recomputed that often will eventually be recomputed with
+ * stale or partial evidence. Making the transition monotonic means that costs
+ * nothing — the worst case is that a stage is briefly behind, rather than a
+ * won deal quietly becoming an open one.
+ *
+ * Exported because the derivation is not the only writer. A person confirming
+ * a meeting in the console writes a stage too, and had its own copy of this
+ * rule with the ratchet left out.
+ */
+export function advanceStage(current: DealStage, candidate: DealStage): DealStage {
+  if (isTerminalStage(current)) return current;
   return stageRank(candidate) > stageRank(current) ? candidate : current;
 }
 
