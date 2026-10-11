@@ -73,6 +73,18 @@ That is the whole product. `npm start` runs both halves, because a console
 with no worker is the one failure where every page looks healthy and nothing
 ever happens.
 
+```bash
+npm run acceptance     # with it running: does it actually work?
+```
+
+Twenty-one checks against the thing you just started — paste a URL in, a
+worker reads the site, the campaign comes up running with an offer and an ICP
+whose every claim points at a page that was fetched, every console page
+renders for a signed-in operator, a stranger is sent to the login page, the
+health endpoint leaks nothing, and no message is sent to anybody. It serves
+its own one-page site on loopback to read, so it crawls nobody, and it
+deletes what it made.
+
 To watch a full run against the bundled fixture web instead, in two terminals:
 
 ```bash
@@ -676,7 +688,7 @@ src/agent/       the pipeline
   worker.ts        the loop: claim, work, record, reschedule, reap
 
 src/app/         the operator console (Next.js), plus /api/health
-src/cli/         setup, sell, worker, agent, demo, doctor, discover, health
+src/cli/         setup, sell, worker, agent, demo, acceptance, doctor, health
 scripts/         start.mjs (console + workers), datasource.ts (sqlite/postgres)
 deploy/          cron, systemd and GitHub Actions recipes, all free
 fixtures/        ten sites, five scripted buyers, and a server that speaks Groq

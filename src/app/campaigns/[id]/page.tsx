@@ -715,8 +715,39 @@ export default async function CampaignPage({
                 <dt>Address</dt>
                 <dd style={{ fontSize: 12 }}>{sender.postalAddress}</dd>
                 <dt>Opt-out</dt>
-                <dd className="mono" style={{ fontSize: 11 }}>
-                  {sender.unsubscribeUrl ?? <span className="dim">reply-to-stop only</span>}
+                <dd style={{ fontSize: 11 }}>
+                  {/*
+                    What the footer will *actually* carry, which is not the
+                    same as what is stored on the sender. The footer prefers a
+                    signed per-recipient link, falls back to the operator's own
+                    URL, and only then to reply-to-stop — so showing the stored
+                    field alone said "reply-to-stop only" on an install that
+                    was sending one-click links.
+                  */}
+                  {process.env.PUBLIC_BASE_URL ? (
+                    <>
+                      <span className="mono">{`${process.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/api/unsubscribe/…`}</span>
+                      <div className="dim" style={{ fontSize: 11, marginTop: 2 }}>
+                        A signed link per recipient, plus the one-click header Gmail and Yahoo require.
+                      </div>
+                    </>
+                  ) : sender.unsubscribeUrl ? (
+                    <>
+                      <span className="mono">{sender.unsubscribeUrl}</span>
+                      <div className="dim" style={{ fontSize: 11, marginTop: 2 }}>
+                        Your own page. Set <span className="mono">PUBLIC_BASE_URL</span> for a signed
+                        per-recipient link that suppresses the address by itself.
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <span className="dim">reply-to-stop only</span>
+                      <div className="dim" style={{ fontSize: 11, marginTop: 2 }}>
+                        Lawful, and worse: bulk senders are expected to offer a one-click URL. Set{" "}
+                        <span className="mono">PUBLIC_BASE_URL</span> to where this console is reachable.
+                      </div>
+                    </>
+                  )}
                 </dd>
                 <dt>Suppressed</dt>
                 <dd><a href="/suppressions">{suppressions} address(es)</a></dd>

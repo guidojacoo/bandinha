@@ -17,6 +17,7 @@
     "sell": "tsx src/cli/sell.ts",
     "agent": "tsx src/cli/agent.ts",
     "demo": "tsx src/cli/demo.ts",
+    "acceptance": "tsx src/cli/acceptance.ts",
     "doctor": "tsx src/cli/doctor.ts",
     "discover": "tsx src/cli/discover.ts",
     "health": "tsx src/cli/health.ts",

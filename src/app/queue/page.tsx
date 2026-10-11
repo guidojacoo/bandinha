@@ -206,7 +206,15 @@ export default async function QueuePage() {
                   <tr key={job.id}>
                     <td>
                       {job.campaign
-                        ? <a href={`/campaigns/${job.campaign.id}`} style={{ fontWeight: 560 }}>{job.campaign.name}</a>
+                        ? (
+                          <>
+                            <a href={`/campaigns/${job.campaign.id}`} style={{ fontWeight: 560 }}>{job.campaign.name}</a>
+                            {/* Two campaigns started from the same site have
+                                the same name, and on this page they are
+                                otherwise indistinguishable. */}
+                            <span className="reason mono">{job.campaign.id}</span>
+                          </>
+                        )
                         : <span className="dim">—</span>}
                     </td>
                     <td className="mono">{job.kind}</td>

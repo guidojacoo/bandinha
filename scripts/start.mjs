@@ -110,17 +110,59 @@ const MAX_RESTARTS = Number(process.env.SUPERVISOR_MAX_RESTARTS ?? 5);
 const children = new Map();
 let stopping = false;
 
+const windows = process.platform === "win32";
+
+/**
+ * Send a signal to a child and everything it started.
+ *
+ * Found the hard way. These children are launched through a package runner,
+ * which means the process this holds is a wrapper and the thing doing the work
+ * is its child: `npx next start` is one process and `next-server` is another.
+ * A signal sent to the wrapper goes no further, so a shutdown left a console
+ * still holding the port and a worker still holding its claims — the exact
+ * opposite of the promise printed above it.
+ *
+ * So each child gets its own process group and the signal goes to the group.
+ * The side benefit is that Ctrl-C in a terminal no longer reaches them twice,
+ * once from the terminal's foreground group and once from here.
+ */
+function signalTree(child, signal) {
+  if (!child) return;
+  try {
+    if (!windows && child.pid) process.kill(-child.pid, signal);
+    else child.kill(signal);
+  } catch {
+    // Already gone, or a group that no longer exists. Either is fine.
+    try { child.kill(signal); } catch { /* and that is fine too */ }
+  }
+}
+
 function start(name, command, args, tag) {
   const startedAt = Date.now();
   const child = spawn(command, args, {
     cwd: root,
     env: { ...process.env, PORT: port, FORCE_COLOR: process.env.FORCE_COLOR ?? "1" },
     stdio: ["ignore", "pipe", "pipe"],
+    // Its own process group, so a signal can reach the whole tree. Not on
+    // Windows, where detaching opens a console window instead.
+    detached: !windows,
   });
 
   const state = children.get(name) ?? { restarts: 0 };
   state.child = child;
   state.startedAt = startedAt;
+  /**
+   * Liveness is tracked, not inferred.
+   *
+   * `child.exitCode` is null for a process killed by a signal — that case
+   * sets `signalCode` instead — so asking "is exitCode still null?" answers
+   * yes forever once a child has been terminated. The shutdown's wait loop
+   * read it exactly that way and so never noticed the children were gone: it
+   * sat out the whole grace period and then hard-killed processes that had
+   * already stopped politely, which is precisely the behaviour it exists to
+   * avoid.
+   */
+  state.alive = true;
   children.set(name, state);
 
   const prefix = tag(name);
@@ -145,6 +187,7 @@ function start(name, command, args, tag) {
   relay(child.stderr, true);
 
   child.on("exit", (code, signal) => {
+    state.alive = false;
     if (stopping) return;
 
     const ranFor = Date.now() - startedAt;
@@ -222,28 +265,22 @@ function shutdown(reason, code = 0) {
   stopping = true;
   console.log(`\n${colour.dim(`Stopping (${reason})…`)}`);
 
-  for (const [name, state] of children) {
-    if (state.child && state.child.exitCode === null) {
-      state.child.kill("SIGTERM");
-      void name;
-    }
-  }
+  for (const [, state] of children) signalTree(state.child, "SIGTERM");
 
   const grace = Number(process.env.SUPERVISOR_GRACE_MS ?? 15_000);
   const timer = setTimeout(() => {
-    for (const [, state] of children) {
-      if (state.child && state.child.exitCode === null) state.child.kill("SIGKILL");
-    }
-    process.exit(code);
+    console.log(colour.yellow(`Something did not stop within ${Math.round(grace / 1000)}s; killing it.`));
+    for (const [, state] of children) signalTree(state.child, "SIGKILL");
+    // One beat for the kills to land before this process goes away, so
+    // nothing is left orphaned holding a port or a claim.
+    setTimeout(() => process.exit(code), 500);
   }, grace);
 
   const waiter = setInterval(() => {
-    const alive = [...children.values()].filter((s) => s.child && s.child.exitCode === null);
-    if (alive.length === 0) {
-      clearTimeout(timer);
-      clearInterval(waiter);
-      process.exit(code);
-    }
+    if ([...children.values()].some((s) => s.alive)) return;
+    clearTimeout(timer);
+    clearInterval(waiter);
+    process.exit(code);
   }, 200);
 }
 
