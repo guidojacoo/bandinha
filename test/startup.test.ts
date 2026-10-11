@@ -299,3 +299,40 @@ describe("the defaults", () => {
     expect(hostOf("not a url")).toBe("not a url");
   });
 });
+
+describe("where the database is", () => {
+  it("makes a relative SQLite path absolute", async () => {
+    // The bug that stopped a fresh clone from starting at all. A relative
+    // `file:` path means two different files: `prisma db push` resolves it
+    // against the schema's directory and the client resolves it against the
+    // working directory, so setup created the database in one place and the
+    // application looked for it in another — and setup said "ready" anyway.
+    const { dbUrl, dbFilePath } = await import("../src/infra/db");
+    const was = process.env.DATABASE_URL;
+    try {
+      process.env.DATABASE_URL = "file:./data/mercurio.db";
+      expect(dbUrl()).toBe(`file:${process.cwd()}/data/mercurio.db`);
+      expect(dbFilePath()).toBe(`${process.cwd()}/data/mercurio.db`);
+
+      process.env.DATABASE_URL = "file:/var/lib/mercurio/db.sqlite";
+      expect(dbUrl()).toBe("file:/var/lib/mercurio/db.sqlite");
+
+      delete process.env.DATABASE_URL;
+      expect(dbUrl()).toBe(`file:${process.cwd()}/data/mercurio.db`);
+    } finally {
+      process.env.DATABASE_URL = was;
+    }
+  });
+
+  it("leaves a server URL exactly as given", async () => {
+    const { dbUrl, dbFilePath } = await import("../src/infra/db");
+    const was = process.env.DATABASE_URL;
+    try {
+      process.env.DATABASE_URL = "postgresql://user:pass@host:5432/mercurio?sslmode=require";
+      expect(dbUrl()).toBe("postgresql://user:pass@host:5432/mercurio?sslmode=require");
+      expect(dbFilePath()).toBeNull();
+    } finally {
+      process.env.DATABASE_URL = was;
+    }
+  });
+});

@@ -19,7 +19,7 @@ leads.
 campaign moving. Start more workers, on as many machines as you like, and the
 work spreads — the right to do a piece of work is a claimed row, so nothing is
 ever done twice. When a file stops being enough, one command moves it to
-Postgres, and the same 831 tests pass there.
+Postgres, and the same 833 tests pass there.
 
 ---
 
@@ -84,6 +84,13 @@ renders for a signed-in operator, a stranger is sent to the login page, the
 health endpoint leaks nothing, and no message is sent to anybody. It serves
 its own one-page site on loopback to read, so it crawls nobody, and it
 deletes what it made.
+
+Those four commands are the ones that were run, in that order, against a
+clone of this repository with nothing else on the machine. The first time
+that was tried it failed: `npm run setup` reported a database it had created
+somewhere the application would never look. Running the install is the only
+way that class of bug is ever found, which is why `npm run acceptance` exists
+rather than a paragraph claiming it works.
 
 To watch a full run against the bundled fixture web instead, in two terminals:
 
@@ -310,7 +317,7 @@ than asserted:
 TEST_DATABASE_URL="postgresql://postgres@127.0.0.1:5432/mercurio" npm test
 ```
 
-831 tests on SQLite, the same 831 on Postgres 16 — including the queue's
+833 tests on SQLite, the same 833 on Postgres 16 — including the queue's
 compare-and-set claim, the six-worker race, the payment webhook and the
 one-click unsubscribe. Neon and Supabase both have a free tier that fits, so
 it stays free.
@@ -692,7 +699,7 @@ src/cli/         setup, sell, worker, agent, demo, acceptance, doctor, health
 scripts/         start.mjs (console + workers), datasource.ts (sqlite/postgres)
 deploy/          cron, systemd and GitHub Actions recipes, all free
 fixtures/        ten sites, five scripted buyers, and a server that speaks Groq
-test/            831 tests
+test/            833 tests
 ```
 
 The split is the point. Everything that has to be *right* — who may be
@@ -715,9 +722,9 @@ campaign out" is the one path everything else assumes. `unsubscribe` and
 never yours.
 
 ```bash
-npm test         # 831 tests, ~20s
+npm test         # 833 tests, ~20s
 npm run typecheck
-TEST_DATABASE_URL="postgresql://…" npm test   # the same 831, on Postgres
+TEST_DATABASE_URL="postgresql://…" npm test   # the same 833, on Postgres
 ```
 
 ---
@@ -739,7 +746,7 @@ marked as such everywhere they appear. The pure core, the npm, directory and
 seed sources, the crawler, the extractor, the full agent pipeline, the model
 client against Groq's protocol, the quality scorer, the billing layer, the
 payment webhook, the dry-run transport and the console are all proven end to
-end by `npm run demo`, `npm run discover` and 831 tests.
+end by `npm run demo`, `npm run discover` and 833 tests.
 
 And one thing worth saying plainly about the copy: it is measured, and
 measuring is not the same as selling. The scorer encodes what is known to

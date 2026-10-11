@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { PrismaClient } from "../generated/prisma";
 import { fromJson, toJson } from "../lib/json";
 import {
@@ -16,8 +17,42 @@ import type { BudgetStore } from "./llm/types";
 
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
 
+export const DEFAULT_SQLITE_PATH = "data/mercurio.db";
+
+/**
+ * The database URL, with any relative SQLite path made absolute.
+ *
+ * This is not tidying. A relative `file:` path means two different files
+ * depending on who reads it: the Prisma CLI resolves it against the
+ * directory holding `schema.prisma`, and the client at runtime resolves it
+ * against the process's working directory. So `file:./data/mercurio.db` sent
+ * `prisma db push` to `prisma/data/mercurio.db` and the application to
+ * `./data/mercurio.db`, and a fresh install got a cheerful "Database ready"
+ * followed by an app that could not find a database. Found by cloning the
+ * repository and following the README, which is the only way that class of
+ * bug is ever found.
+ *
+ * `process.cwd()` is the right base because every entry point here is an npm
+ * script, and npm runs scripts from the package root.
+ */
 export function dbUrl(): string {
-  return process.env.DATABASE_URL ?? "file:./data/mercurio.db";
+  const configured = process.env.DATABASE_URL;
+  if (!configured) return fileUrl(resolve(process.cwd(), DEFAULT_SQLITE_PATH));
+  if (!configured.startsWith("file:")) return configured;
+
+  const path = configured.slice("file:".length);
+  if (path.startsWith("/")) return configured;
+  return fileUrl(resolve(process.cwd(), path));
+}
+
+function fileUrl(absolutePath: string): string {
+  return `file:${absolutePath}`;
+}
+
+/** Where the SQLite file is, or null when this is not SQLite at all. */
+export function dbFilePath(): string | null {
+  const url = dbUrl();
+  return url.startsWith("file:") ? url.slice("file:".length) : null;
 }
 
 export const db: PrismaClient =

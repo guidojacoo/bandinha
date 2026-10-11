@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import bcrypt from "bcryptjs";
-import { db } from "../infra/db";
+import { db, dbFilePath, dbUrl } from "../infra/db";
 import { ask, colour, heading, run } from "./lib";
 
 /**
@@ -59,14 +59,17 @@ run(async () => {
     console.log(`${colour.dim("·")} ${envPath} already exists, left alone.`);
   }
 
-  const url = process.env.DATABASE_URL ?? "file:./data/mercurio.db";
+  // The same absolute URL the application will use. Resolving it here rather
+  // than passing a relative path is the whole fix for a fresh install:
+  // `prisma db push` resolves a relative SQLite path against the schema's
+  // directory and the client resolves it against the working directory, so a
+  // relative path created the database in one place and looked for it in
+  // another — and this step reported success either way.
+  const url = dbUrl();
+  const file = dbFilePath();
 
-  // A file needs its directory to exist first; a server needs nothing from
-  // us. Branching on the scheme rather than assuming a file is what lets the
-  // same command set up either — see `npm run db:provider`.
-  const onAFile = url.startsWith("file:");
-  const target = onAFile ? url.slice("file:".length) : describeServer(url);
-  if (onAFile) mkdirSync(dirname(target) || ".", { recursive: true });
+  const target = file ?? describeServer(url);
+  if (file) mkdirSync(dirname(file) || ".", { recursive: true });
 
   console.log(`${colour.dim("·")} Applying the schema to ${target}…`);
   try {
@@ -74,7 +77,12 @@ run(async () => {
       stdio: process.env.DEBUG === "1" ? "inherit" : "pipe",
       env: { ...process.env, DATABASE_URL: url },
     });
-    console.log(`${colour.green("✓")} Database ready.`);
+    // Trust, then verify. "Database ready" followed by an application that
+    // cannot find a database is the worst possible first five minutes.
+    if (file && !existsSync(file)) {
+      throw new Error(`The schema was applied but there is no database at ${file}. Set DATABASE_URL to an absolute path and try again.`);
+    }
+    console.log(`${colour.green("✓")} Database ready${file ? ` at ${file}` : ""}.`);
   } catch (error) {
     console.error(`${colour.red("✗")} Could not apply the schema.`);
     throw error;
@@ -101,9 +109,11 @@ run(async () => {
   }
 
   heading("Next");
-  console.log(`  ${colour.bold("npm run demo")}     watch a full run against the bundled fixture web`);
-  console.log(`  ${colour.bold("npm run sell")} <url>   start a campaign from a real website`);
-  console.log(`  ${colour.bold("npm run doctor")}   check what is configured and what is missing`);
-  console.log(`  ${colour.bold("npm run dev")}      the operator console on http://localhost:3000\n`);
+  console.log(`  ${colour.bold("npm run build && npm start")}   the console on :3000, and a worker`);
+  console.log(colour.dim("    Both. A console with no worker looks perfectly healthy and never does anything.\n"));
+  console.log(`  ${colour.bold("npm run acceptance")}           with it running: twenty-one checks that it works`);
+  console.log(`  ${colour.bold("npm run demo")}                 watch a full run against the bundled fixture web`);
+  console.log(`  ${colour.bold("npm run doctor")}               what is configured here, and what is missing`);
+  console.log(`  ${colour.bold("npm run sell")} <url>           start a campaign from a terminal instead\n`);
   console.log(colour.dim("Nothing is sent to a real address until SMTP is configured AND a campaign has live sending armed."));
 });
