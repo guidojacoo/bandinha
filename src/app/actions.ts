@@ -7,6 +7,7 @@ import { createSession, destroySession, ownedCampaign, readSession, verifyPasswo
 import { db, logEvent } from "../infra/db";
 import { toJson, fromJson } from "../lib/json";
 import { enqueue, revive } from "../infra/queue";
+import { startCampaign } from "../agent/campaigns";
 import { smtpConfigFromEnv } from "../infra/transport";
 import { DEFAULT_TERMS, monthOf, type PricingTerms } from "../core/billing";
 import { closeDeal, confirmMeeting, markInvoiced } from "../agent/billing";
@@ -68,42 +69,20 @@ export async function createCampaign(formData: FormData): Promise<void> {
   if (!url) redirect("/new?error=url");
   if (!fromName || !fromEmail || !postalAddress) redirect("/new?error=sender");
 
-  const campaign = await db.campaign.create({
-    data: {
-      userId: session.userId,
-      sourceUrl: url,
-      // A placeholder until the crawl finds the company's real name. Showing
-      // the host is better than showing nothing, and better than showing a
-      // name the agent has not actually read anywhere.
-      name: hostOf(url),
-      status: "ingesting",
-      senderIdentity: toJson({
-        fromName, fromEmail, postalAddress,
-        unsubscribeUrl: unsubscribeUrl || undefined,
-        replyTo: fromEmail,
-      }),
-      meetingLink: meetingLink || null,
-      targetLeads: Number.isFinite(targetLeads) ? Math.min(500, Math.max(1, targetLeads)) : 25,
-      minFitScore: Number.isFinite(minFitScore) ? Math.min(100, Math.max(0, minFitScore)) : 55,
-      liveSending: false,
+  const campaign = await startCampaign({
+    userId: session.userId,
+    url,
+    sender: {
+      fromName, fromEmail, postalAddress,
+      unsubscribeUrl: unsubscribeUrl || undefined,
+      replyTo: fromEmail,
     },
+    meetingLink,
+    targetLeads,
+    minFitScore,
   });
-
-  await logEvent(campaign.id, "campaign.created", `Created from ${url}. Reading the site now.`, {
-    level: "success",
-  });
-  await enqueue({ kind: "ingest", campaignId: campaign.id });
 
   redirect(`/campaigns/${campaign.id}`);
-}
-
-/** The host, for a name to show until the crawl finds the real one. */
-function hostOf(url: string): string {
-  try {
-    return new URL(url).hostname.replace(/^www\./, "");
-  } catch {
-    return url.slice(0, 60);
-  }
 }
 
 /**

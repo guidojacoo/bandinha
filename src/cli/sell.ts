@@ -1,6 +1,6 @@
-import { db, logEvent } from "../infra/db";
+import { db } from "../infra/db";
 import { ingest } from "../agent/ingest";
-import { toJson } from "../lib/json";
+import { startCampaign } from "../agent/campaigns";
 import { describeMailSetup } from "../infra/transport";
 import { ask, colour, fatal, heading, llmForRun, requireDatabase, run } from "./lib";
 
@@ -87,32 +87,27 @@ run(async () => {
   const targetLeads = Number(await ask("How many leads to work:", "25"));
   const minFitScore = Number(await ask("Minimum fit score (0-100):", "55"));
 
-  const campaign = await db.campaign.create({
-    data: {
-      userId: user.id,
-      sourceUrl: url,
-      name: offering.companyName,
-      status: "running",
-      offering: toJson(offering),
-      icp: toJson(icp),
-      senderIdentity: toJson({ fromName, fromEmail, postalAddress, unsubscribeUrl: unsubscribeUrl || undefined, replyTo: fromEmail }),
-      meetingLink: meetingLink || null,
-      targetLeads: Number.isFinite(targetLeads) ? Math.max(1, targetLeads) : 25,
-      minFitScore: Number.isFinite(minFitScore) ? Math.min(100, Math.max(0, minFitScore)) : 55,
-      liveSending: false,
-    },
-  });
-
-  await logEvent(campaign.id, "campaign.created", `Campaign created from ${url}.`, {
-    level: "success",
-    data: { via, sources: icp.preferredSources },
+  // The site was read above, so this campaign starts ready to work. The
+  // console's form leaves `ingested` out and a worker does the reading, which
+  // is the difference between a CLI somebody is watching and a form
+  // submission that has a request timeout.
+  const campaign = await startCampaign({
+    userId: user.id,
+    url,
+    sender: { fromName, fromEmail, postalAddress, unsubscribeUrl: unsubscribeUrl || undefined, replyTo: fromEmail },
+    meetingLink,
+    targetLeads,
+    minFitScore,
+    ingested: { offering, icp, via, notes: [] },
   });
 
   heading("Ready");
   const mail = describeMailSetup(false);
   console.log(`  Campaign ${colour.bold(campaign.id)}`);
   console.log(`  ${mail.transport}`);
-  console.log(`\n  ${colour.bold(`npm run agent -- ${campaign.id}`)}        one tick`);
-  console.log(`  ${colour.bold(`npm run agent -- ${campaign.id} --loop`)} keep going`);
-  console.log(`\n  ${colour.dim("Live sending is off. Arm it in the console once you have read what it writes.")}\n`);
+  console.log(`\n  A tick is already queued for it. Something has to run it:\n`);
+  console.log(`    ${colour.bold("npm start")}                        the console and a worker`);
+  console.log(`    ${colour.bold("npm run worker")}                   a worker on its own`);
+  console.log(`\n  ${colour.dim(`Or watch one happen: npm run agent -- ${campaign.id}`)}`);
+  console.log(`  ${colour.dim("Live sending is off. Arm it in the console once you have read what it writes.")}\n`);
 });

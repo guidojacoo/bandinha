@@ -8,13 +8,36 @@
  * lead supply is open data is fatal.
  */
 
-export const USER_AGENT =
-  process.env.MERCURIO_USER_AGENT ??
-  "MercurioBot/1.0 (+https://github.com/mercurio-agent; open-data sales research)";
+/**
+ * Read at call time, not at module scope.
+ *
+ * The third time this exact mistake has been found here — the LLM endpoint
+ * and the lock directory were the first two — so it is worth stating the rule
+ * rather than the instance: a module-scope `process.env` read is frozen at
+ * import and cannot be changed afterwards. That makes the setting untestable,
+ * and now that a worker runs many campaigns in one process it also makes it
+ * impossible for two of them ever to be configured differently.
+ *
+ * The cost of being wrong here is the dullest kind: a test suite that waits
+ * 1.2 seconds per page for politeness that nobody needs against a server on
+ * loopback.
+ */
+export function userAgent(): string {
+  return process.env.MERCURIO_USER_AGENT ??
+    "MercurioBot/1.0 (+https://github.com/mercurio-agent; open-data sales research)";
+}
 
-const DEFAULT_TIMEOUT_MS = Number(process.env.HTTP_TIMEOUT_MS ?? 12_000);
-const MAX_BYTES = Number(process.env.HTTP_MAX_BYTES ?? 2_000_000);
-const PER_HOST_DELAY_MS = Number(process.env.HTTP_PER_HOST_DELAY_MS ?? 1_200);
+function defaultTimeoutMs(): number {
+  return Number(process.env.HTTP_TIMEOUT_MS ?? 12_000);
+}
+
+function maxBytes(): number {
+  return Number(process.env.HTTP_MAX_BYTES ?? 2_000_000);
+}
+
+function perHostDelayMs(): number {
+  return Number(process.env.HTTP_PER_HOST_DELAY_MS ?? 1_200);
+}
 
 export interface FetchResult {
   ok: boolean;
@@ -35,13 +58,14 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** One request per host at a time, spaced by `PER_HOST_DELAY_MS`. */
+/** One request per host at a time, spaced by the per-host delay. */
 async function waitForTurn(host: string): Promise<void> {
+  const delay = perHostDelayMs();
   const previous = lastRequestAt.get(host) ?? 0;
-  const wait = previous + PER_HOST_DELAY_MS - Date.now();
+  const wait = previous + delay - Date.now();
   // Claim the slot before awaiting, so concurrent callers queue rather than
   // all reading the same stale timestamp and firing at once.
-  lastRequestAt.set(host, Math.max(Date.now(), previous + PER_HOST_DELAY_MS));
+  lastRequestAt.set(host, Math.max(Date.now(), previous + delay));
   if (wait > 0) await sleep(wait);
 }
 
@@ -74,7 +98,7 @@ export async function fetchText(url: string, options: FetchOptions = {}): Promis
   if (!options.immediate) await waitForTurn(parsed.host);
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? defaultTimeoutMs());
 
   try {
     const response = await fetch(parsed.toString(), {
@@ -83,7 +107,7 @@ export async function fetchText(url: string, options: FetchOptions = {}): Promis
       redirect: "follow",
       signal: controller.signal,
       headers: {
-        "user-agent": USER_AGENT,
+        "user-agent": userAgent(),
         accept: options.accept ?? "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.5",
         "accept-language": "en,*;q=0.5",
         ...options.headers,
@@ -91,7 +115,7 @@ export async function fetchText(url: string, options: FetchOptions = {}): Promis
     });
 
     const contentType = response.headers.get("content-type") ?? "";
-    const { text, truncated } = await readCapped(response, options.maxBytes ?? MAX_BYTES);
+    const { text, truncated } = await readCapped(response, options.maxBytes ?? maxBytes());
     return {
       ok: response.ok,
       status: response.status,
@@ -104,7 +128,7 @@ export async function fetchText(url: string, options: FetchOptions = {}): Promis
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { ...base, error: controller.signal.aborted ? `Timed out after ${options.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms` : message };
+    return { ...base, error: controller.signal.aborted ? `Timed out after ${options.timeoutMs ?? defaultTimeoutMs()}ms` : message };
   } finally {
     clearTimeout(timer);
   }
@@ -240,7 +264,10 @@ export async function fetchAllowed(url: string, options: FetchOptions = {}): Pro
       error: "Disallowed by robots.txt",
     };
   }
-  if (rules.crawlDelayMs > PER_HOST_DELAY_MS) await sleep(rules.crawlDelayMs - PER_HOST_DELAY_MS);
+  // A site asking for a longer gap than ours gets it. Shorter is ignored:
+  // their robots.txt is permission, not an instruction to go faster.
+  const ours = perHostDelayMs();
+  if (rules.crawlDelayMs > ours) await sleep(rules.crawlDelayMs - ours);
   return fetchText(url, options);
 }
 

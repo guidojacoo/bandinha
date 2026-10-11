@@ -19,7 +19,7 @@ leads.
 campaign moving. Start more workers, on as many machines as you like, and the
 work spreads — the right to do a piece of work is a claimed row, so nothing is
 ever done twice. When a file stops being enough, one command moves it to
-Postgres, and the same 820 tests pass there.
+Postgres, and the same 831 tests pass there.
 
 ---
 
@@ -298,7 +298,7 @@ than asserted:
 TEST_DATABASE_URL="postgresql://postgres@127.0.0.1:5432/mercurio" npm test
 ```
 
-820 tests on SQLite, the same 820 on Postgres 16 — including the queue's
+831 tests on SQLite, the same 831 on Postgres 16 — including the queue's
 compare-and-set claim, the six-worker race, the payment webhook and the
 one-click unsubscribe. Neon and Supabase both have a free tier that fits, so
 it stays free.
@@ -664,6 +664,7 @@ src/infra/       everything that touches the outside world
   db.ts            Prisma; SQLite by default, Postgres by one command
 
 src/agent/       the pipeline
+  campaigns.ts     starting one: the row and its first job, in that order
   ingest.ts        one URL -> a sellable position
   qualify.ts       a domain -> a decision, with the reason recorded
   compose.ts       the message, quote first, claims declared
@@ -679,7 +680,7 @@ src/cli/         setup, sell, worker, agent, demo, doctor, discover, health
 scripts/         start.mjs (console + workers), datasource.ts (sqlite/postgres)
 deploy/          cron, systemd and GitHub Actions recipes, all free
 fixtures/        ten sites, five scripted buyers, and a server that speaks Groq
-test/            820 tests
+test/            831 tests
 ```
 
 The split is the point. Everything that has to be *right* — who may be
@@ -689,19 +690,22 @@ what may be charged for — is a pure function with its inputs passed in. That
 is why the dangerous paths can be tested exhaustively without an inbox, a
 resolver, or a model.
 
-Six test files are deliberately not pure, and each has a reason it has to be.
+Seven test files are deliberately not pure, and each has a reason it has to be.
 `groq-wire` runs the real model client against a local server that implements
 Groq's protocol, because Groq is unreachable from here and the alternative was
 shipping that path untested. `payments` exercises the only route that can
 record money. `queue-db` proves the claim is genuinely atomic, which is a
 property of the database rather than of a function. `worker` races six workers
-over ten campaigns and counts. `unsubscribe` and `health` are route handlers.
-All six run against a throwaway database, never yours.
+over ten campaigns and counts. `startup` runs the real
+crawler against a real HTTP server, because "paste a URL in, get a working
+campaign out" is the one path everything else assumes. `unsubscribe` and
+`health` are route handlers. All seven run against a throwaway database,
+never yours.
 
 ```bash
-npm test         # 820 tests, ~20s
+npm test         # 831 tests, ~20s
 npm run typecheck
-TEST_DATABASE_URL="postgresql://…" npm test   # the same 820, on Postgres
+TEST_DATABASE_URL="postgresql://…" npm test   # the same 831, on Postgres
 ```
 
 ---
@@ -723,7 +727,7 @@ marked as such everywhere they appear. The pure core, the npm, directory and
 seed sources, the crawler, the extractor, the full agent pipeline, the model
 client against Groq's protocol, the quality scorer, the billing layer, the
 payment webhook, the dry-run transport and the console are all proven end to
-end by `npm run demo`, `npm run discover` and 820 tests.
+end by `npm run demo`, `npm run discover` and 831 tests.
 
 And one thing worth saying plainly about the copy: it is measured, and
 measuring is not the same as selling. The scorer encodes what is known to
